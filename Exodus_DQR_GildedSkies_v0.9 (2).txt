@@ -1,0 +1,3278 @@
+local G = (getgenv and getgenv()) or _G
+local RESUME = false
+pcall(function()
+    if isfile and readfile and isfile("Exodus/DQR_autostart.txt") then
+        RESUME = readfile("Exodus/DQR_autostart.txt") == "1"
+    end
+end)
+if G.ExodusDQR and type(G.ExodusDQR.Destroy) == "function" then
+    pcall(G.ExodusDQR.Destroy)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+local GuiService = game:GetService("GuiService")
+local HttpService = game:GetService("HttpService")
+local VirtualUser = game:GetService("VirtualUser")
+local VIM
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+local LP = Players.LocalPlayer
+
+local CFG = {
+    ScriptURL = "https://pastebin.com/raw/L6FEdV6Y",
+    Folder = "Exodus",
+    LobbyPlace = 77649408247578,
+    DungeonPlace = 85776757589518,
+    Difficulty = "Insane",
+    FirstKey = Enum.KeyCode.Q,
+    SecondKey = Enum.KeyCode.E,
+    UseFirst = true,
+    UseSecond = true,
+    AlwaysSpeed = true,
+    SpeedSlot = "Auto",
+    SpeedMargin = 0.9,
+    PressMode = "Both",
+    Orbit = true,
+    OrbitRadius = 42,
+    BossOrbit = 50,
+    CamAim = true,
+    FaceMode = "Constraint",
+    ContAim = false,
+    LookCam = true,
+    CastGap = 0.3,
+    DodgeZones = true,
+    ReactionMs = 60,
+    ZonePad = 4,
+    BossPad = 2.2,
+    ZoneHard = 1.4,
+    Lead = 3,
+    Hit = 0.4,
+    BossTele = 1.2,
+    SafePref = 5,
+    SafeHard = 2,
+    ZoneMinLife = 1.2,
+    ZoneMaxLife = 5,
+    Linger = 1.0,
+    FaceAway = true,
+    LookHold = 2.5,
+    BossNames = { "kiryne", "archpriest", "cragg", "vytelus" },
+    PriorityNames = { mage = -30, familiar = -15 },
+    MinEnemyMaxHealth = 1000,
+    Humanize = 1.0,
+    HidePlayers = false,
+    AutoEnter = true,
+    AutoNav = true,
+    MaxRuns = 0,
+    BreakMin = 10,
+    BreakMax = 25,
+    MaxDeathsPerRun = 3,
+    RunTimeout = 840,
+    EndTexts = { "dungeon complete", "dungeon cleared", "victory", "mission complete" },
+    EndButtons = { "continue", "return to lobby", "return", "leave", "claim", "lobby", "okay", "ok" },
+    LowQuality = false,
+    NoShadows = false,
+    No3D = false,
+    FpsCapOn = false,
+    FpsCap = 60,
+    Debug = false,
+}
+
+local S = {
+    running = false, state = "OFF", runs = 0, deaths = 0, runDeaths = 0, room = 0,
+    runStart = nil, lastEnemyT = 0, nextCast = 0, castHold = 0, lastCast = 0, casting = false,
+    lookAway = false, laCheck = 0, lookUntil = 0, bossPos = nil, breakUntil = 0, nextEnd = 0, nextJump = 0,
+    clicked = {}, black = {}, errs = 0, lastClear = 0, orbitDir = 1,
+    dungeon = false, diffTries = 0, dungeonTries = 0, lastDiff = 0, queued = false,
+    resumed = false, lobbyBreak = false, waitT = nil, target = nil,
+    sampleT = nil, samplePos = nil, ticks = 0, moveTicks = 0, wantMove = false, blockHits = 0,
+    nextStartTry = 0, nextPromptScan = 0, nextPrompt = 0, startPrompt = nil, nextHost = 0, nextConfirm = 0,
+    roomDone = {}, roomSince = {}, roomIdle = {}, nextRoomLog = 0, roomStuck = 0, aimOff = 0, dGoal = nil, dGoalT = 0,
+    speedIcons = {}, speedScanned = false, calibrating = false, lastCalib = 0, nextSpeed = 0,
+    dBad = {}, dPos = nil, dT = 0, startT = os.clock(),
+}
+local conns = {}
+local alive = true
+local uiDestroy, toastFn
+local Start, Stop
+
+local function track(c) conns[#conns + 1] = c return c end
+local rand = Random.new()
+local function jitter(a, b) return a + rand:NextNumber() * (b - a) end
+
+local logbuf = {}
+local function log(msg)
+    local line = string.format("[%0.1f] %s", os.clock(), tostring(msg))
+    logbuf[#logbuf + 1] = line
+    if #logbuf > 400 then table.remove(logbuf, 1) end
+    if CFG.Debug then print("[Exodus] " .. line) end
+end
+
+local function notify(title, content, dur)
+    if toastFn then pcall(toastFn, title, content, dur) end
+end
+
+local function getChar()
+    local c = LP.Character
+    if not c then return nil end
+    local h = c:FindFirstChildOfClass("Humanoid")
+    local r = c:FindFirstChild("HumanoidRootPart")
+    if h and r and h.Health > 0 then return c, h, r end
+    return nil
+end
+
+local hasFS = (writefile and readfile and isfile) and true or false
+local function ensureFolder()
+    if makefolder and isfolder and not isfolder(CFG.Folder) then pcall(makefolder, CFG.Folder) end
+end
+local function writeFile(name, v)
+    if not hasFS then return end
+    ensureFolder()
+    pcall(writefile, CFG.Folder .. "/" .. name, tostring(v))
+end
+local function readFile(name)
+    if not hasFS then return nil end
+    local ok, v = pcall(function()
+        if isfile(CFG.Folder .. "/" .. name) then return readfile(CFG.Folder .. "/" .. name) end
+        return nil
+    end)
+    if ok then return v end
+    return nil
+end
+
+local Gui = { labels = {} }
+
+local function trimText(g)
+    local t = tostring(g.Text or "")
+    t = t:gsub("<[^>]+>", "")
+    t = t:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    return t
+end
+
+local function isShown(g)
+    local o = g
+    while o and o ~= game do
+        if o:IsA("GuiObject") and not o.Visible then return false end
+        if o:IsA("ScreenGui") and not o.Enabled then return false end
+        o = o.Parent
+    end
+    return true
+end
+
+local function trackGui(d)
+    if d:IsA("TextLabel") or d:IsA("TextButton") then Gui.labels[d] = true end
+end
+
+function Gui.find(patterns, exact)
+    for g in pairs(Gui.labels) do
+        if not g.Parent then
+            Gui.labels[g] = nil
+        else
+            local t = trimText(g)
+            if t ~= "" then
+                for _, p in ipairs(patterns) do
+                    local hit
+                    if exact then hit = (t == p) else hit = (t:find(p, 1, true) ~= nil) end
+                    if hit and isShown(g) then return g, p end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function Gui.tap(btn)
+    if not VIM or not btn or not btn:IsA("GuiObject") then return end
+    local sg = btn:FindFirstAncestorOfClass("ScreenGui")
+    local inset = Vector2.new(0, 0)
+    if sg and not sg.IgnoreGuiInset then inset = GuiService:GetGuiInset() end
+    local c = btn.AbsolutePosition + btn.AbsoluteSize / 2 + inset
+    pcall(function()
+        VIM:SendMouseMoveEvent(c.X, c.Y, game)
+        task.wait(jitter(0.05, 0.1))
+        VIM:SendMouseButtonEvent(c.X, c.Y, 0, true, game, 0)
+        task.wait(jitter(0.04, 0.08))
+        VIM:SendMouseButtonEvent(c.X, c.Y, 0, false, game, 0)
+    end)
+end
+
+local function pgui() return LP:FindFirstChild("PlayerGui") end
+
+local function child(o, ...)
+    for _, n in ipairs({ ... }) do
+        if not o then return nil end
+        o = o:FindFirstChild(n)
+    end
+    return o
+end
+
+local Input = {}
+
+local SIGNALS = { "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }
+function Input.fire(btn)
+    if not btn then return false end
+    if firesignal then
+        for _, n in ipairs(SIGNALS) do pcall(function() firesignal(btn[n]) end) end
+        return true
+    end
+    if getconnections then
+        for _, n in ipairs(SIGNALS) do
+            pcall(function()
+                for _, cn in ipairs(getconnections(btn[n])) do cn:Fire() end
+            end)
+        end
+        return true
+    end
+    return false
+end
+
+function Input.key(kc, hold)
+    hold = hold or jitter(0.04, 0.09)
+    local ok = false
+    if VIM then ok = pcall(function() VIM:SendKeyEvent(true, kc, false, game) end) end
+    if ok then
+        task.wait(hold)
+        pcall(function() VIM:SendKeyEvent(false, kc, false, game) end)
+        return true
+    end
+    local v = kc.Value
+    if keypress and keyrelease and v >= 97 and v <= 122 then
+        pcall(keypress, v - 32)
+        task.wait(hold)
+        pcall(keyrelease, v - 32)
+        return true
+    end
+    return false
+end
+
+local function abilitySlot(kc)
+    local name
+    if kc == Enum.KeyCode.E then name = "RightAbility" elseif kc == Enum.KeyCode.Q then name = "LeftAbility" end
+    if not name then return nil end
+    return child(pgui(), "abilities", "Frame", name, "slot")
+end
+
+local function abilityReady(kc)
+    local slot = abilitySlot(kc)
+    if not slot then return true end
+    local cd = slot:FindFirstChild("cooldownNumber")
+    if cd and cd:IsA("TextLabel") and cd.Visible then
+        local n = tonumber(cd.Text)
+        if n and n > 0.05 then return false end
+    end
+    return true
+end
+
+function Input.ability(kc)
+    if CFG.PressMode ~= "Button" then Input.key(kc) end
+    if CFG.PressMode ~= "Key" then
+        local slot = abilitySlot(kc)
+        local b = slot and slot:FindFirstChildWhichIsA("GuiButton", true)
+        if b then Input.fire(b) end
+    end
+end
+
+local function slotIcon(kc)
+    local slot = abilitySlot(kc)
+    local b = slot and slot:FindFirstChildWhichIsA("ImageButton", true)
+    if b and b.Image ~= "" then return b.Image end
+    return nil
+end
+
+local function loadSpeed()
+    local raw = readFile("DQR_speed.json")
+    if not raw then return end
+    local ok, t = pcall(function() return HttpService:JSONDecode(raw) end)
+    if ok and type(t) == "table" then
+        for k, v in pairs(t) do S.speedIcons[k] = v end
+    end
+end
+
+local function saveSpeed()
+    writeFile("DQR_speed.json", HttpService:JSONEncode(S.speedIcons))
+end
+
+local function scanSpeedIcons()
+    S.speedScanned = true
+    local pg = pgui()
+    if not pg then return end
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("ImageButton") or d:IsA("ImageLabel") then
+            local pn = d.Parent and d.Parent.Name:lower() or ""
+            local ppn = (d.Parent and d.Parent.Parent) and d.Parent.Parent.Name:lower() or ""
+            local hay = d.Name:lower() .. " " .. pn .. " " .. ppn
+            if (hay:find("inner focus", 1, true) or hay:find("inner rage", 1, true)) and d.Image ~= "" then
+                S.speedIcons[d.Image] = true
+            end
+        end
+    end
+end
+
+local function isSpeedSlot(kc)
+    local mode = CFG.SpeedSlot
+    if mode == "None" then return false end
+    if mode == "First" then return kc == CFG.FirstKey end
+    if mode == "Second" then return kc == CFG.SecondKey end
+    if mode == "Both" then return true end
+    local icon = slotIcon(kc)
+    if icon and S.speedIcons[icon] ~= nil then return S.speedIcons[icon] end
+    return nil
+end
+
+local function toButton(g)
+    if g:IsA("GuiButton") then return g end
+    return g:FindFirstAncestorWhichIsA("GuiButton") or g
+end
+
+local function press(btn, idem)
+    if not btn then return false end
+    Input.fire(btn)
+    task.wait(0.45)
+    if idem or isShown(btn) then Gui.tap(btn) end
+    return true
+end
+
+local function calibrate(kc)
+    S.calibrating = true
+    pcall(function()
+        local _, hum = getChar()
+        local icon = slotIcon(kc)
+        if not hum or not icon then return end
+        local before = hum.WalkSpeed
+        Input.ability(kc)
+        local peak = before
+        local t0 = os.clock()
+        while os.clock() - t0 < 1.2 do
+            task.wait(0.1)
+            local _, h = getChar()
+            if h and h.WalkSpeed > peak then peak = h.WalkSpeed end
+        end
+        local isSpeed = peak >= before + 1.5
+        S.speedIcons[icon] = isSpeed
+        saveSpeed()
+        log(string.format("calibrated %s: speed ability=%s (%.1f -> %.1f)", tostring(kc), tostring(isSpeed), before, peak))
+    end)
+    S.calibrating = false
+end
+
+local Scanner = { hum = {} }
+local Dodger = { zones = {}, groups = {}, tele = {}, adorns = {}, mem = { byGroup = {}, attacks = 0, lastEvent = 0, lastCount = 0, counted = {} } }
+
+function Scanner.isEnemy(model)
+    if model:FindFirstAncestor("turretFolder") then return false end
+    local d = workspace:FindFirstChild("dungeon")
+    if d and model:IsDescendantOf(d) then return true end
+    local e = workspace:FindFirstChild("enemies")
+    if e and model:IsDescendantOf(e) then return true end
+    return false
+end
+
+function Scanner.isBoss(model)
+    local n = model.Name:lower()
+    if n:find("boss", 1, true) then return true end
+    for _, b in ipairs(CFG.BossNames) do
+        if n:find(b, 1, true) then return true end
+    end
+    return false
+end
+
+function Scanner.list(pos)
+    local out = {}
+    local now = os.clock()
+    for h, model in pairs(Scanner.hum) do
+        if not h.Parent then
+            Scanner.hum[h] = nil
+        elseif h.Health > 0 and h.MaxHealth >= CFG.MinEnemyMaxHealth and not (S.black[h] and S.black[h] > now) and Scanner.isEnemy(model) then
+            local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+            if root then
+                local d = ((root.Position - pos) * Vector3.new(1, 0, 1)).Magnitude
+                local n = model.Name:lower()
+                local score = d
+                local boss = Scanner.isBoss(model)
+                if boss then score = score - 80 end
+                for k, v in pairs(CFG.PriorityNames) do
+                    if n:find(k, 1, true) then score = score + v end
+                end
+                out[#out + 1] = { h = h, model = model, root = root, dist = d, score = score, boss = boss }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.score < b.score end)
+    return out
+end
+
+local function pickTarget(list)
+    if #list == 0 then
+        S.target = nil
+        return nil
+    end
+    local best = list[1]
+    if S.target then
+        for _, e in ipairs(list) do
+            if e.h == S.target and best.score > e.score - 25 then
+                return e
+            end
+        end
+    end
+    S.target = best.h
+    return best
+end
+
+local function zoneShape(p)
+    local s, cf = p.Size, p.CFrame
+    if p:IsA("Part") then
+        if p.Shape == Enum.PartType.Ball then return "circle", s.X / 2 end
+        if p.Shape == Enum.PartType.Cylinder then
+            if math.abs(cf.RightVector.Y) > 0.8 then return "circle", math.max(s.Y, s.Z) / 2 end
+            return nil
+        end
+    end
+    local ax = { cf.RightVector, cf.UpVector, cf.LookVector }
+    local vi, best = 1, -1
+    for i = 1, 3 do
+        local y = math.abs(ax[i].Y)
+        if y > best then best = y vi = i end
+    end
+    if best < 0.7 then return nil end
+    local others = {}
+    for i = 1, 3 do
+        if i ~= vi then others[#others + 1] = i end
+    end
+    return "box", others
+end
+
+local function prepZone(z)
+    local cf, sz = z.cf, z.size
+    local c = cf.Position
+    z.cx = c.X
+    z.cz = c.Z
+    if z.kind == "circle" then
+        z.r = z.a
+        return true
+    end
+    local axes = { cf.RightVector, cf.UpVector, cf.LookVector }
+    local sizes = { sz.X, sz.Y, sz.Z }
+    local a1, a2 = axes[z.a[1]], axes[z.a[2]]
+    local m1 = math.sqrt(a1.X * a1.X + a1.Z * a1.Z)
+    local m2 = math.sqrt(a2.X * a2.X + a2.Z * a2.Z)
+    if m1 < 0.1 or m2 < 0.1 then return false end
+    z.ux = a1.X / m1
+    z.uz = a1.Z / m1
+    z.vx = a2.X / m2
+    z.vz = a2.Z / m2
+    z.hu = sizes[z.a[1]] / 2
+    z.hv = sizes[z.a[2]] / 2
+    return true
+end
+
+local function clearance(z, px, pz)
+    local rx, rz = px - z.cx, pz - z.cz
+    if z.kind == "circle" then
+        return math.sqrt(rx * rx + rz * rz) - z.r
+    end
+    local du = math.abs(rx * z.ux + rz * z.uz) - z.hu
+    local dv = math.abs(rx * z.vx + rz * z.vz) - z.hv
+    if du > dv then return du end
+    return dv
+end
+
+local TELE_DEFAULTS = { longline = 1.25, passivecricle = 1.47, beamtracker = 0.8, orbprecast = 1.0, safespot = 3.3 }
+local function teleDefault(name)
+    local n = name:lower()
+    for k, v in pairs(TELE_DEFAULTS) do
+        if n:find(k, 1, true) then return v end
+    end
+    return CFG.BossTele
+end
+
+function Dodger.eval(zs, px, pz, tArr)
+    local m, mh = math.huge, math.huge
+    for i = 1, #zs do
+        local zn = zs[i]
+        if zn.t1 > tArr then
+            local c = clearance(zn, px, pz)
+            local a = c - zn.pad
+            if a < m then m = a end
+            local b = c - CFG.ZoneHard
+            if b < mh then mh = b end
+        end
+    end
+    local sg = zs.safe
+    if sg then
+        for i = 1, #sg do
+            local g = sg[i]
+            if g.t1 > tArr then
+                local best, bestR = -math.huge, 10
+                for j = 1, #g.circles do
+                    local c = g.circles[j]
+                    local dx, dz = px - c.cx, pz - c.cz
+                    local ins = c.r - math.sqrt(dx * dx + dz * dz)
+                    if ins > best then
+                        best = ins
+                        bestR = c.r
+                    end
+                end
+                local a = best - math.min(CFG.SafePref, bestR * 0.45)
+                if a < m then m = a end
+                local b = best - math.min(CFG.SafeHard, bestR * 0.25)
+                if b < mh then mh = b end
+            end
+        end
+    end
+    return m, mh
+end
+
+function Dodger.unsafe(zs, pos, now)
+    local m = Dodger.eval(zs, pos.X, pos.Z, now)
+    return m < 0
+end
+
+function Dodger.has(zs)
+    return #zs > 0 or (zs.safe ~= nil and #zs.safe > 0)
+end
+
+function Dodger.safePending(zs, now)
+    local sg = zs.safe
+    if not sg then return false end
+    for i = 1, #sg do
+        if sg[i].t1 > now then return true end
+    end
+    return false
+end
+
+local function onPartAdded(p)
+    if not p.Anchored or p.CanCollide then return end
+    local nm = p.Name:lower()
+    if nm:find("orb", 1, true) and nm:find("boss", 1, true) and p:IsA("Part") and p.Shape == Enum.PartType.Ball then
+        Dodger.zones[p] = {
+            p = p, born = os.clock(), removed = nil, kind = "circle", a = p.Size.X / 2 + 6, cf = p.CFrame, size = p.Size,
+            isPre = false, isHit = false, pre = false, hit = false, par = p.Name, boss = true, isOrb = true,
+        }
+        return
+    end
+    local isPre = nm == "precast" or nm == "circleprecast"
+    local isHit = nm == "hitbox"
+    if isPre or isHit then
+        local kind, a = zoneShape(p)
+        local par = p.Parent
+        local pname = par and par.Name or "?"
+        local lname = pname:lower()
+        local boss = lname:find("boss", 1, true) ~= nil
+        local g
+        if boss and par then
+            g = Dodger.groups[par]
+            if not g then
+                local t0 = teleDefault(pname)
+                local memSafe = lname:find("memorysafezone", 1, true) ~= nil
+                local memDmg = lname:find("memorydamagezone", 1, true) ~= nil
+                g = {
+                    model = par, name = pname, born = os.clock(), preSeen = false, preAlive = 0, preMax = 0,
+                    firstGone = nil, preGone = nil, impact = os.clock() + t0, t0 = os.clock(), t1 = os.clock() + t0 + 1.5,
+                    safe = (not memSafe) and (lname:find("safespot", 1, true) ~= nil or lname:find("safezone", 1, true) ~= nil),
+                    orb = lname:find("orb", 1, true) ~= nil, tele0 = t0, memSafe = memSafe, memDmg = memDmg,
+                }
+                Dodger.groups[par] = g
+                if memSafe then
+                    Dodger.mem.lastEvent = os.clock()
+                    log("memory circle appeared")
+                end
+            end
+        end
+        Dodger.zones[p] = {
+            p = p, born = os.clock(), removed = nil, kind = kind, a = a, cf = p.CFrame, size = p.Size,
+            isPre = isPre, isHit = isHit, pre = false, hit = false, par = pname, boss = boss, g = g,
+        }
+    end
+end
+
+local function onDesc(d)
+    if d:IsA("BasePart") then
+        onPartAdded(d)
+    elseif d:IsA("Humanoid") then
+        local model = d.Parent
+        if not model or not model:IsA("Model") then return end
+        if Players:GetPlayerFromCharacter(model) or model.Name == LP.Name then return end
+        Scanner.hum[d] = model
+    end
+end
+
+function Dodger.snapshot(now)
+    local react = CFG.ReactionMs / 1000
+    for _, g in pairs(Dodger.groups) do g.preAlive = 0 end
+    for p, z in pairs(Dodger.zones) do
+        local alive = p.Parent ~= nil
+        if alive and z.isPre and p.Transparency > 0.97 then alive = false end
+        if alive then
+            local par = p.Parent
+            z.pre = par:FindFirstChild("precast") ~= nil
+            z.hit = par:FindFirstChild("hitBox") ~= nil
+            local kind, a = zoneShape(p)
+            if kind then
+                if z.isOrb and a then a = a + 6 end
+                z.kind = kind
+                z.a = a
+                z.cf = p.CFrame
+                z.size = p.Size
+            end
+            z.removed = nil
+            if z.g and z.isPre then
+                z.g.preAlive = z.g.preAlive + 1
+                z.g.preSeen = true
+            end
+        elseif not z.removed then
+            z.removed = now
+        end
+    end
+    for m, g in pairs(Dodger.groups) do
+        local tele = Dodger.tele[g.name] or g.tele0
+        if g.preAlive > g.preMax then g.preMax = g.preAlive end
+        if g.preMax > 0 and g.preAlive < g.preMax and not g.firstGone then
+            g.firstGone = now
+            local d = now - g.born
+            Dodger.tele[g.name] = tele * 0.6 + d * 0.4
+            log(string.format("telegraph %s first strip gone after %.2fs", g.name, d))
+        end
+        if g.preSeen and g.preAlive == 0 and not g.preGone then
+            g.preGone = now
+        end
+        local est = g.born + tele
+        local impact
+        if g.firstGone then
+            impact = g.firstGone
+        elseif g.preAlive > 0 and now > est then
+            impact = now + 0.3
+        else
+            impact = est
+        end
+        g.impact = impact
+        local endBase = g.preGone or (impact + 0.6)
+        if g.safe then
+            g.t1 = endBase + 1.0
+            g.t0 = g.born
+        elseif g.orb then
+            g.t1 = endBase + 0.6
+            g.t0 = g.born + react
+        else
+            g.t1 = endBase + CFG.Hit
+            g.t0 = impact - CFG.Lead
+        end
+        if g.memDmg and now > g.t1 and not Dodger.mem.counted[g] then
+            Dodger.mem.counted[g] = true
+            if now - Dodger.mem.lastCount > 1.2 then
+                Dodger.mem.lastCount = now
+                Dodger.mem.attacks = Dodger.mem.attacks + 1
+                Dodger.mem.lastEvent = now
+                log("memory attack " .. Dodger.mem.attacks .. " resolved")
+            end
+        end
+        if now > g.t1 + 0.5 or now - g.born > 9 then Dodger.groups[m] = nil end
+    end
+    local mem = Dodger.mem
+    if next(mem.byGroup) and now - mem.lastEvent > 14 then
+        mem.byGroup = {}
+        mem.counted = {}
+        mem.attacks = 0
+    end
+    local out = {}
+    local safeMap = {}
+    for p, z in pairs(Dodger.zones) do
+        local keep = true
+        local t0, t1
+        if z.isOrb then
+            if p.Parent == nil and (not z.removed or now - z.removed > 0.4) then keep = false end
+            t0 = z.born
+            t1 = now + 1
+        elseif z.boss then
+            local g = z.g
+            if not g or Dodger.groups[g.model] ~= g then
+                keep = false
+            else
+                t0 = math.max(g.t0, z.born + react)
+                t1 = g.t1
+            end
+        else
+            local endT = z.born + CFG.ZoneMaxLife
+            if z.removed then
+                endT = math.min(endT, math.max(z.born + CFG.ZoneMinLife, z.removed + CFG.Linger))
+            end
+            if now > endT then keep = false end
+            t0 = z.born + react
+            t1 = endT
+        end
+        if not keep then
+            Dodger.zones[p] = nil
+        elseif z.kind and now <= t1 then
+            local use
+            if z.isOrb then
+                use = true
+            elseif z.boss then
+                local g = z.g
+                if g.memDmg then
+                    use = false
+                elseif g.memSafe then
+                    use = false
+                    if z.isPre and z.kind == "circle" and prepZone(z) then
+                        local e = mem.byGroup[g]
+                        if not e then
+                            e = { cx = z.cx, cz = z.cz, r = z.r, born = g.born }
+                            mem.byGroup[g] = e
+                        elseif z.r > e.r then
+                            e.cx = z.cx
+                            e.cz = z.cz
+                            e.r = z.r
+                        end
+                    end
+                elseif g.safe then
+                    use = z.isPre and z.kind == "circle"
+                elseif z.isHit then
+                    use = true
+                else
+                    use = not z.hit
+                end
+            elseif z.isPre then
+                use = not z.hit
+            else
+                use = z.pre
+            end
+            if use and prepZone(z) then
+                z.t0 = t0
+                z.t1 = t1
+                z.pad = z.boss and CFG.BossPad or CFG.ZonePad
+                if z.boss and z.g and z.g.safe then
+                    local sg = safeMap[z.g]
+                    if not sg then
+                        sg = { t0 = t0, t1 = t1, circles = {}, name = z.g.name }
+                        safeMap[z.g] = sg
+                    end
+                    sg.circles[#sg.circles + 1] = z
+                else
+                    out[#out + 1] = z
+                end
+            end
+        end
+    end
+    out.safe = {}
+    for _, sg in pairs(safeMap) do out.safe[#out.safe + 1] = sg end
+    if next(mem.byGroup) then
+        local sorted = {}
+        for _, e in pairs(mem.byGroup) do sorted[#sorted + 1] = e end
+        table.sort(sorted, function(a, b) return a.born < b.born end)
+        local k = mem.attacks + 1
+        if k <= #sorted then
+            local e = sorted[k]
+            out.safe[#out.safe + 1] = {
+                t0 = now, t1 = now + 3, name = "memory",
+                circles = { { cx = e.cx, cz = e.cz, r = e.r, t0 = now, t1 = now + 3, pad = 0 } },
+            }
+        end
+    end
+    return out
+end
+
+local function rayParams()
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = { LP.Character }
+    pcall(function() rp.RespectCanCollide = true end)
+    return rp
+end
+
+local function walkable(from, to, rp)
+    local g = workspace:Raycast(to + Vector3.new(0, 6, 0), Vector3.new(0, -30, 0), rp)
+    if not g then return nil end
+    if workspace:Raycast(from + Vector3.new(0, 2, 0), to - from, rp) then return nil end
+    return Vector3.new(to.X, g.Position.Y + 3, to.Z)
+end
+
+local function crossOk(from, to, zs, now, speed)
+    local dx, dz = to.X - from.X, to.Z - from.Z
+    local d = math.sqrt(dx * dx + dz * dz)
+    local steps = math.max(1, math.floor(d / 3))
+    for st = 1, steps do
+        local f = st / steps
+        local x, z = from.X + dx * f, from.Z + dz * f
+        local t = now + (d * f) / speed
+        for i = 1, #zs do
+            local zn = zs[i]
+            if t >= zn.t0 - 0.05 and t <= zn.t1 then
+                if clearance(zn, x, z) < 0.3 then return false end
+            end
+        end
+    end
+    return true
+end
+
+function Dodger.escape(pos, speed, zs, now)
+    local bestV, bestPt
+    for i = 0, 15 do
+        local a = (i / 16) * math.pi * 2
+        local x, z = pos.X + math.cos(a) * 12, pos.Z + math.sin(a) * 12
+        local _, mh = Dodger.eval(zs, x, z, now + 12 / (speed * CFG.SpeedMargin))
+        if not bestV or mh > bestV then
+            bestV = mh
+            bestPt = Vector3.new(x, pos.Y, z)
+        end
+    end
+    return bestPt
+end
+
+function Dodger.plan(pos, speed, desired, anchor, orbitR, zs, now)
+    local rp = rayParams()
+    local px, pz = pos.X, pos.Z
+    local sp = speed * CFG.SpeedMargin
+    local cands = {}
+    local all = {}
+    local best
+    local bad = S.dBad
+    local function nearBad(x, z)
+        for i = 1, #bad do
+            local b = bad[i]
+            if b.t > now then
+                local dx, dz = x - b.x, z - b.z
+                if dx * dx + dz * dz < 36 then return true end
+            end
+        end
+        return false
+    end
+    local function consider(x, z, d, far, keepAll)
+        local m, mh = Dodger.eval(zs, x, z, now + d / sp)
+        if not best or mh > best.mh then best = { x = x, z = z, far = far, mh = mh } end
+        if keepAll then all[#all + 1] = { x = x, z = z, mh = mh } end
+        if mh >= 0 and not nearBad(x, z) then
+            local cost = d
+            if m < 0 then cost = cost - m * 5 end
+            if desired then
+                local dx, dz = x - desired.X, z - desired.Z
+                cost = cost + math.sqrt(dx * dx + dz * dz) * 0.3
+            elseif anchor then
+                local ax, az = x - anchor.X, z - anchor.Z
+                cost = cost + math.abs(math.sqrt(ax * ax + az * az) - orbitR) * 0.25
+            end
+            cands[#cands + 1] = { x = x, z = z, cost = cost, far = far }
+        end
+    end
+    local function ring(R, stepSize, keepAll)
+        for ix = -R, R, stepSize do
+            for iz = -R, R, stepSize do
+                local d = math.sqrt(ix * ix + iz * iz)
+                if d <= R then consider(px + ix, pz + iz, d, false, keepAll) end
+            end
+        end
+    end
+    local function climb(x, z)
+        local stepLen = 1.5
+        local d0 = math.sqrt((x - px) ^ 2 + (z - pz) ^ 2)
+        local _, cur = Dodger.eval(zs, x, z, now + d0 / sp)
+        for _ = 1, 6 do
+            local bx, bz, bv = x, z, cur
+            for k = 0, 7 do
+                local a = (k / 8) * math.pi * 2
+                local nx, nz = x + math.cos(a) * stepLen, z + math.sin(a) * stepLen
+                local d = math.sqrt((nx - px) ^ 2 + (nz - pz) ^ 2)
+                local _, v = Dodger.eval(zs, nx, nz, now + d / sp)
+                if v > bv then bx, bz, bv = nx, nz, v end
+            end
+            if bx == x and bz == z then
+                stepLen = stepLen / 2
+            else
+                x, z, cur = bx, bz, bv
+            end
+            if stepLen < 0.3 then break end
+        end
+        consider(x, z, math.sqrt((x - px) ^ 2 + (z - pz) ^ 2), false, false)
+    end
+    ring(30, 2.5, true)
+    if #cands < 6 then
+        table.sort(all, function(a, b) return a.mh > b.mh end)
+        for i = 1, math.min(#all, 10) do climb(all[i].x, all[i].z) end
+    end
+    if #cands == 0 then
+        ring(60, 5, false)
+        if #cands == 0 and best then climb(best.x, best.z) end
+    end
+    if zs.safe then
+        for _, sg in ipairs(zs.safe) do
+            if sg.t1 > now then
+                for _, c in ipairs(sg.circles) do
+                    local dx, dz = c.cx - px, c.cz - pz
+                    local dist = math.sqrt(dx * dx + dz * dz)
+                    consider(c.cx, c.cz, dist, dist > 30, false)
+                    if dist > 1 then
+                        local inner = math.max(0, dist - (c.r - 8))
+                        consider(px + dx / dist * inner, pz + dz / dist * inner, inner, inner > 30, false)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(cands, function(a, b) return a.cost < b.cost end)
+    local function resolve(c)
+        if c.far then
+            local g = workspace:Raycast(Vector3.new(c.x, pos.Y + 6, c.z), Vector3.new(0, -40, 0), rp)
+            if g then return Vector3.new(c.x, g.Position.Y + 3, c.z) end
+            return nil
+        end
+        return walkable(pos, Vector3.new(c.x, pos.Y, c.z), rp)
+    end
+    for i = 1, math.min(#cands, 16) do
+        local c = cands[i]
+        local w = resolve(c)
+        if w and crossOk(pos, w, zs, now, sp) then return w end
+    end
+    for i = 1, math.min(#cands, 16) do
+        local w = resolve(cands[i])
+        if w then return w end
+    end
+    if best then
+        local w = resolve(best)
+        if w then return w end
+        return Vector3.new(best.x, pos.Y, best.z)
+    end
+    return nil
+end
+
+function Dodger.goal(pos, speed, desired, anchor, orbitR, zs, now)
+    local g = S.dGoal
+    if g and now - S.dGoalT < 2.5 then
+        local dx, dz = g.X - pos.X, g.Z - pos.Z
+        local d = math.sqrt(dx * dx + dz * dz)
+        if d > 2.5 then
+            local _, mh = Dodger.eval(zs, g.X, g.Z, now + d / (speed * CFG.SpeedMargin))
+            if mh >= 0 then return g end
+        end
+    end
+    local w = Dodger.plan(pos, speed, desired, anchor, orbitR, zs, now)
+    if not w then w = Dodger.escape(pos, speed, zs, now) end
+    if w then
+        S.dGoal = w
+        S.dGoalT = now
+    end
+    return w
+end
+
+local function adornParent()
+    local ok, p = pcall(function() return (gethui and gethui()) or game:GetService("CoreGui") end)
+    if ok and p then return p end
+    return workspace.CurrentCamera
+end
+
+local function drawDebug(zs, now)
+    if not CFG.Debug then
+        for p, a in pairs(Dodger.adorns) do
+            a:Destroy()
+            Dodger.adorns[p] = nil
+        end
+        return
+    end
+    local seen = {}
+    for _, z in ipairs(zs) do
+        if z.p.Parent then
+            seen[z.p] = true
+            local a = Dodger.adorns[z.p]
+            if not a then
+                a = Instance.new("BoxHandleAdornment")
+                a.AlwaysOnTop = true
+                a.ZIndex = 5
+                a.Transparency = 0.65
+                a.Adornee = z.p
+                a.Parent = adornParent()
+                Dodger.adorns[z.p] = a
+            end
+            a.Size = z.p.Size
+            if now >= z.t0 then
+                a.Color3 = Color3.fromRGB(255, 60, 60)
+            elseif now >= z.t0 - 0.4 then
+                a.Color3 = Color3.fromRGB(255, 200, 40)
+            else
+                a.Color3 = Color3.fromRGB(60, 220, 100)
+            end
+        end
+    end
+    for p, a in pairs(Dodger.adorns) do
+        if not seen[p] then
+            a:Destroy()
+            Dodger.adorns[p] = nil
+        end
+    end
+end
+
+local Aim = { att = nil, ao = nil, dir = nil, untilT = 0, lockUntil = 0, locked = false }
+
+function Aim.ensure(hrp)
+    if Aim.ao and Aim.ao.Parent == hrp and Aim.att and Aim.att.Parent == hrp then return true end
+    if Aim.ao then pcall(function() Aim.ao:Destroy() end) end
+    if Aim.att then pcall(function() Aim.att:Destroy() end) end
+    Aim.ao = nil
+    Aim.att = nil
+    local ok = pcall(function()
+        local att = Instance.new("Attachment")
+        att.Name = "ExodusAimAttachment"
+        att.Parent = hrp
+        local ao = Instance.new("AlignOrientation")
+        ao.Name = "ExodusAim"
+        ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
+        ao.Attachment0 = att
+        ao.RigidityEnabled = false
+        ao.MaxTorque = 1e9
+        ao.MaxAngularVelocity = 100
+        ao.Responsiveness = 60
+        ao.Enabled = false
+        ao.Parent = hrp
+        Aim.att = att
+        Aim.ao = ao
+    end)
+    return ok and Aim.ao ~= nil
+end
+
+function Aim.face(dir)
+    if CFG.FaceMode == "Off" then return end
+    local v = Vector3.new(dir.X, 0, dir.Z)
+    if v.Magnitude < 0.01 then return end
+    Aim.dir = v.Unit
+    Aim.untilT = os.clock() + 0.25
+    Aim.lockUntil = math.max(Aim.lockUntil, os.clock() + 0.3)
+end
+
+function Aim.snap(tpos)
+    local cam = workspace.CurrentCamera
+    if CFG.CamAim and cam then
+        local cp = cam.CFrame.Position
+        if (tpos - cp).Magnitude > 1 then cam.CFrame = CFrame.lookAt(cp, tpos) end
+    end
+    if CFG.FaceMode == "Off" then return end
+    local _, _, hrp = getChar()
+    if not hrp then return end
+    local pos = hrp.Position
+    local v = Vector3.new(tpos.X - pos.X, 0, tpos.Z - pos.Z)
+    if v.Magnitude < 0.1 then return end
+    Aim.face(v)
+    hrp.CFrame = CFrame.lookAt(pos, pos + v)
+end
+
+function Aim.release()
+    Aim.dir = nil
+    Aim.lockUntil = 0
+    if Aim.ao then pcall(function() Aim.ao.Enabled = false end) end
+    local _, hum = getChar()
+    if hum and Aim.locked then hum.AutoRotate = true end
+    Aim.locked = false
+end
+
+function Aim.update()
+    local _, hum, hrp = getChar()
+    if not hrp then return end
+    local now = os.clock()
+    local want = now < Aim.lockUntil and CFG.FaceMode ~= "Off"
+    if want and not Aim.locked then
+        hum.AutoRotate = false
+        Aim.locked = true
+    elseif not want and Aim.locked then
+        hum.AutoRotate = true
+        Aim.locked = false
+    end
+    local active = Aim.dir ~= nil and now < Aim.untilT and CFG.FaceMode ~= "Off"
+    if active and CFG.FaceMode == "Constraint" then
+        if Aim.ensure(hrp) then
+            Aim.ao.CFrame = CFrame.lookAt(Vector3.new(0, 0, 0), Aim.dir)
+            Aim.ao.Enabled = true
+        end
+    else
+        if Aim.ao and Aim.ao.Enabled then Aim.ao.Enabled = false end
+        if active and CFG.FaceMode == "CFrame" then
+            local pos = hrp.Position
+            hrp.CFrame = CFrame.lookAt(pos, pos + Aim.dir)
+        end
+    end
+end
+
+local Cam = { last = 0 }
+function Cam.snap(pos)
+    if not CFG.LookCam then return end
+    local now = os.clock()
+    if now - Cam.last < 0.35 then return end
+    Cam.last = now
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local cp = cam.CFrame.Position
+    if (pos - cp).Magnitude < 1 then return end
+    cam.CFrame = CFrame.lookAt(cp, pos)
+end
+
+local Mover = {
+    goal = nil, want = nil, alts = nil, wps = nil, wi = 2, dirty = false, busy = false, lastPos = nil, lastT = 0,
+    stuck = 0, lastCompute = 0, sideUntil = 0, sidePt = nil, failed = false, failAt = 0, flip = false,
+}
+
+local AGENT_RADII = { 2.5, 1.4, 0.7 }
+
+function Mover.clear()
+    Mover.goal = nil
+    Mover.want = nil
+    Mover.alts = nil
+    Mover.wps = nil
+    Mover.dirty = false
+    Mover.stuck = 0
+    Mover.sidePt = nil
+    Mover.failed = false
+end
+
+function Mover.setGoal(g, alts)
+    if alts then Mover.alts = alts end
+    if Mover.want and (Mover.want - g).Magnitude < 5 then return end
+    local now = os.clock()
+    if Mover.want and Mover.wps and now - Mover.lastCompute < 0.7 then
+        Mover.want = g
+        return
+    end
+    Mover.want = g
+    Mover.goal = g
+    Mover.wps = nil
+    Mover.dirty = true
+end
+
+local function computePath(from)
+    if Mover.busy then return end
+    Mover.busy = true
+    Mover.dirty = false
+    Mover.lastCompute = os.clock()
+    local want = Mover.want
+    local alts = Mover.alts
+    task.spawn(function()
+        local chosen, wps
+        local tries = { want }
+        if alts then
+            for i = 1, math.min(#alts, 3) do tries[#tries + 1] = alts[i] end
+        end
+        for ti, g in ipairs(tries) do
+            for ri, rad in ipairs(AGENT_RADII) do
+                if not (ti > 1 and ri > 2) then
+                    local path = PathfindingService:CreatePath({ AgentRadius = rad, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 6 })
+                    local ok = pcall(function() path:ComputeAsync(from, g) end)
+                    if ok and path.Status == Enum.PathStatus.Success then
+                        chosen = g
+                        wps = path:GetWaypoints()
+                        break
+                    end
+                end
+            end
+            if wps or Mover.want ~= want then break end
+        end
+        if Mover.want == want then
+            if wps then
+                Mover.goal = chosen
+                Mover.wps = wps
+                Mover.wi = 2
+                Mover.failed = false
+            else
+                Mover.goal = want
+                Mover.wps = {}
+                Mover.failed = true
+                Mover.failAt = os.clock()
+            end
+        end
+        Mover.busy = false
+    end)
+end
+
+local function sidestepPoint(pos, goal, flip)
+    local flat = Vector3.new(1, 0, 1)
+    local fwd = (goal - pos) * flat
+    if fwd.Magnitude < 0.1 then fwd = Vector3.new(1, 0, 0) end
+    fwd = fwd.Unit
+    local left = Vector3.new(-fwd.Z, 0, fwd.X)
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = { LP.Character }
+    pcall(function() rp.RespectCanCollide = true end)
+    local dirs = { left, -left, (left + fwd).Unit, (-left + fwd).Unit, (left - fwd).Unit, (-left - fwd).Unit }
+    if flip then dirs = { -left, left, (-left + fwd).Unit, (left + fwd).Unit, (-left - fwd).Unit, (left - fwd).Unit } end
+    local best, bestD
+    for _, d in ipairs(dirs) do
+        local r = workspace:Raycast(pos + Vector3.new(0, 1.5, 0), d * 12, rp)
+        local free = r and (r.Position - pos).Magnitude or 12
+        if not bestD or free > bestD + 1.5 then
+            bestD = free
+            best = d
+        end
+    end
+    return pos + best * math.max(4, math.min(bestD - 1.5, 10))
+end
+
+function Mover.step(hum, hrp)
+    local goal = Mover.goal
+    if not goal then return nil end
+    local pos = hrp.Position
+    local now = os.clock()
+    local flatV = Vector3.new(1, 0, 1)
+    if Mover.sidePt and now < Mover.sideUntil then
+        hum:MoveTo(Mover.sidePt)
+        return "moving"
+    end
+    if ((goal - pos) * flatV).Magnitude < 3.5 then
+        Mover.clear()
+        return "arrived"
+    end
+    if Mover.dirty then computePath(pos) end
+    local wps = Mover.wps
+    local wp = wps and wps[Mover.wi]
+    while wp and ((wp.Position - pos) * flatV).Magnitude < 3.5 do
+        Mover.wi = Mover.wi + 1
+        wp = wps[Mover.wi]
+    end
+    if wp then
+        if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+        hum:MoveTo(wp.Position)
+    else
+        hum:MoveTo(goal)
+    end
+    if now - Mover.lastT >= 0.8 then
+        if Mover.lastPos and (pos - Mover.lastPos).Magnitude < 1.0 then
+            Mover.stuck = Mover.stuck + 1
+            hum.Jump = true
+            if Mover.stuck == 2 or Mover.stuck == 4 then
+                Mover.flip = not Mover.flip
+                Mover.sidePt = sidestepPoint(pos, goal, Mover.flip)
+                Mover.sideUntil = now + 0.9
+                log("stuck: sidestep")
+            end
+            if Mover.stuck >= 3 then
+                Mover.wps = nil
+                Mover.dirty = true
+            end
+            if Mover.stuck >= 7 then
+                Mover.stuck = 0
+                Mover.lastPos = pos
+                Mover.lastT = now
+                return "stuck"
+            end
+        else
+            Mover.stuck = 0
+        end
+        Mover.lastPos = pos
+        Mover.lastT = now
+    end
+    return "moving"
+end
+
+local function isStunned()
+    local sp = workspace:FindFirstChild("stunParts")
+    return sp ~= nil and sp:FindFirstChild(LP.Name) ~= nil
+end
+
+local Combat = {}
+
+local function castWithAim(kc, tpos)
+    pcall(function()
+        if CFG.FaceMode ~= "Off" or CFG.CamAim then Aim.snap(tpos) end
+        RunService.Heartbeat:Wait()
+        Input.ability(kc)
+    end)
+    S.casting = false
+end
+
+function Combat.cast(now, hum, hrp, tpos)
+    if S.casting or S.calibrating or now < S.nextCast or now < S.castHold then return false end
+    if hum.WalkSpeed < 4 or hrp.Anchored or hum.PlatformStand or isStunned() then return false end
+    local keys = {}
+    if CFG.UseFirst then keys[#keys + 1] = CFG.FirstKey end
+    if CFG.UseSecond then keys[#keys + 1] = CFG.SecondKey end
+    for _, k in ipairs(keys) do
+        local sp = isSpeedSlot(k)
+        local skip = CFG.AlwaysSpeed and (sp == true or (sp == nil and CFG.SpeedSlot == "Auto" and slotIcon(k) ~= nil))
+        if not skip and abilityReady(k) then
+            S.casting = true
+            S.nextCast = now + CFG.CastGap * CFG.Humanize * jitter(0.85, 1.3)
+            S.lastCast = now
+            task.spawn(castWithAim, k, tpos)
+            return true
+        end
+    end
+    return false
+end
+
+function Combat.speedTick(now, hum, hrp, unsafe)
+    if not CFG.AlwaysSpeed or S.casting or S.calibrating or unsafe then return false end
+    if now < S.nextSpeed then return false end
+    if hum.WalkSpeed < 4 or hrp.Anchored or hum.PlatformStand or isStunned() then return false end
+    if not S.speedScanned then scanSpeedIcons() end
+    for _, kc in ipairs({ CFG.FirstKey, CFG.SecondKey }) do
+        local sp = isSpeedSlot(kc)
+        if sp == true and abilityReady(kc) then
+            S.nextSpeed = now + 0.35
+            task.spawn(Input.ability, kc)
+            return true
+        elseif sp == nil and CFG.SpeedSlot == "Auto" and abilityReady(kc) and now - S.lastCalib > 1.0 and slotIcon(kc) then
+            S.lastCalib = now
+            task.spawn(calibrate, kc)
+            return true
+        end
+    end
+    return false
+end
+
+local Hide = { saved = setmetatable({}, { __mode = "k" }), running = false }
+
+local function hideApply(d)
+    if d:IsA("BasePart") then
+        d.LocalTransparencyModifier = 1
+    elseif d:IsA("Decal") or d:IsA("Texture") then
+        if Hide.saved[d] == nil then Hide.saved[d] = d.Transparency end
+        d.Transparency = 1
+    elseif d:IsA("BillboardGui") or d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+        if Hide.saved[d] == nil then Hide.saved[d] = d.Enabled end
+        d.Enabled = false
+    elseif d:IsA("Humanoid") then
+        d.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+    end
+end
+
+local function hideRestore()
+    for d, v in pairs(Hide.saved) do
+        pcall(function()
+            if d:IsA("Decal") or d:IsA("Texture") then d.Transparency = v else d.Enabled = v end
+        end)
+    end
+    Hide.saved = setmetatable({}, { __mode = "k" })
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LP and pl.Character then
+            for _, d in ipairs(pl.Character:GetDescendants()) do
+                if d:IsA("BasePart") then pcall(function() d.LocalTransparencyModifier = 0 end) end
+                if d:IsA("Humanoid") then pcall(function() d.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer end) end
+            end
+        end
+    end
+end
+
+function Hide.set(on)
+    if on then
+        if Hide.running then return end
+        Hide.running = true
+        task.spawn(function()
+            while CFG.HidePlayers and alive do
+                for _, pl in ipairs(Players:GetPlayers()) do
+                    if pl ~= LP and pl.Character then
+                        for _, d in ipairs(pl.Character:GetDescendants()) do pcall(hideApply, d) end
+                    end
+                end
+                task.wait(1.5)
+            end
+            Hide.running = false
+        end)
+    else
+        hideRestore()
+    end
+end
+
+local function lookAwayActive(now)
+    if now < S.laCheck then return S.lookAway end
+    S.laCheck = now + 0.1
+    S.lookAway = Gui.find({ "look away" }, false) ~= nil
+    return S.lookAway
+end
+
+local function roomsInfo()
+    local out = {}
+    local d = workspace:FindFirstChild("dungeon")
+    if not d then return out end
+    for _, c in ipairs(d:GetChildren()) do
+        local ef = c:FindFirstChild("enemyFolder")
+        if ef then
+            local sum, n = Vector3.new(0, 0, 0), 0
+            for _, sp in ipairs(ef:GetChildren()) do
+                if sp:IsA("BasePart") then
+                    sum = sum + sp.Position
+                    n = n + 1
+                end
+            end
+            if n > 0 then
+                local ov = c:FindFirstChild("order")
+                local order = tonumber(c.Name:match("%d+")) or 999
+                if ov and ov:IsA("IntValue") then order = ov.Value end
+                if c.Name == "bossRoom" then order = 1000 end
+                local spawns = {}
+                for _, sp in ipairs(ef:GetChildren()) do
+                    if sp:IsA("BasePart") then spawns[#spawns + 1] = sp.Position end
+                end
+                out[#out + 1] = { name = c.Name, order = order, pos = sum / n, spawns = spawns, barrier = c:FindFirstChild("barrier") ~= nil }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.order < b.order end)
+    return out
+end
+
+local function roomsPending()
+    for _, r in ipairs(roomsInfo()) do
+        if not S.roomDone[r.name] then return true end
+    end
+    return false
+end
+
+local function nextRoomGoal(pos, now)
+    local rooms = roomsInfo()
+    if #rooms == 0 then return nil, false end
+    local flat = Vector3.new(1, 0, 1)
+    for _, r in ipairs(rooms) do
+        if not S.roomDone[r.name] then
+            S.room = r.order
+            S.roomSince[r.name] = S.roomSince[r.name] or now
+            local d = ((r.pos - pos) * flat).Magnitude
+            if now - S.roomSince[r.name] > 60 then
+                S.roomDone[r.name] = true
+                log("room skipped (timeout): " .. r.name)
+            elseif d < 30 then
+                S.roomIdle[r.name] = S.roomIdle[r.name] or now
+                if now - S.roomIdle[r.name] > 4 then
+                    S.roomDone[r.name] = true
+                    log("room done: " .. r.name)
+                end
+                return nil, true
+            else
+                if r.barrier and Mover.failed and now - Mover.failAt < 3 then
+                    return nil, true
+                end
+                local alts = {}
+                for _, sp in ipairs(r.spawns) do alts[#alts + 1] = sp end
+                table.sort(alts, function(a, b) return (a - pos).Magnitude < (b - pos).Magnitude end)
+                return r.pos, true, alts
+            end
+        end
+    end
+    return nil, true
+end
+
+local function watchProgress(now, pos, target, hum)
+    if not S.sampleT or now - S.sampleT > 3 then
+        S.sampleT = now
+        S.samplePos = pos
+        S.ticks = 0
+        S.moveTicks = 0
+        return
+    end
+    S.ticks = S.ticks + 1
+    if S.wantMove then S.moveTicks = S.moveTicks + 1 end
+    if now - S.sampleT < 0.9 then return end
+    local moved = ((pos - S.samplePos) * Vector3.new(1, 0, 1)).Magnitude
+    local wanted = S.ticks > 0 and (S.moveTicks / S.ticks) > 0.7
+    S.sampleT = now
+    S.samplePos = pos
+    S.ticks = 0
+    S.moveTicks = 0
+    if wanted and moved < 4 then
+        S.castHold = now + 0.9
+        S.blockHits = S.blockHits + 1
+        log(string.format("blocked: moved %.1f hits %d", moved, S.blockHits))
+        if now < S.lookUntil then
+            S.aimOff = now + 3
+            Aim.release()
+        end
+        if S.blockHits >= 5 then
+            S.black[target.h] = now + 10
+            S.blockHits = 0
+            Mover.clear()
+            hum.Jump = true
+            log("target blacklisted: unreachable")
+        end
+    elseif moved >= 8 then
+        S.blockHits = 0
+    end
+end
+
+local function ringAlts(tpos, r, pos)
+    local out = {}
+    for i = 0, 7 do
+        local a = (i / 8) * math.pi * 2
+        out[#out + 1] = Vector3.new(tpos.X + math.cos(a) * r, pos.Y, tpos.Z + math.sin(a) * r)
+    end
+    table.sort(out, function(x, y) return (x - pos).Magnitude < (y - pos).Magnitude end)
+    return out
+end
+
+local function orbitGoal(pos, tpos, r)
+    local rel = (pos - tpos) * Vector3.new(1, 0, 1)
+    if rel.Magnitude < 1 then rel = Vector3.new(1, 0, 0) end
+    local ang = math.atan2(rel.Z, rel.X) + S.orbitDir * 0.5
+    return Vector3.new(tpos.X + math.cos(ang) * r, pos.Y, tpos.Z + math.sin(ang) * r)
+end
+
+local function goTo(hum, hrp, goal, pos)
+    local d = ((goal - pos) * Vector3.new(1, 0, 1)).Magnitude
+    if d > 28 then
+        Mover.setGoal(goal)
+        Mover.step(hum, hrp)
+    else
+        Mover.clear()
+        hum:MoveTo(goal)
+    end
+end
+
+local function dodgeWatch(now, pos, hum)
+    local flat = Vector3.new(1, 0, 1)
+    if not S.dPos or now - S.dT > 1.5 then
+        S.dPos = pos
+        S.dT = now
+        return
+    end
+    if now - S.dT >= 0.5 then
+        local moved = ((pos - S.dPos) * flat).Magnitude
+        S.dPos = pos
+        S.dT = now
+        if moved < 0.8 and not isStunned() then
+            hum.Jump = true
+            if S.dGoal then
+                S.dBad[#S.dBad + 1] = { x = S.dGoal.X, z = S.dGoal.Z, t = now + 3 }
+                if #S.dBad > 8 then table.remove(S.dBad, 1) end
+            end
+            S.dGoal = nil
+            Mover.clear()
+            if now < S.lookUntil then
+                S.aimOff = now + 3
+                Aim.release()
+            end
+            log("dodge stuck, replanning")
+        end
+    end
+end
+
+local function brain(hum, hrp)
+    local now = os.clock()
+    local pos = hrp.Position
+    local flat = Vector3.new(1, 0, 1)
+    local list = Scanner.list(pos)
+    if #list > 0 then
+        S.lastEnemyT = now
+        S.roomIdle = {}
+    end
+    local target = pickTarget(list)
+    local boss
+    for _, e in ipairs(list) do
+        if e.boss then boss = e break end
+    end
+    if boss then S.bossPos = boss.root.Position end
+
+    local lookAway = false
+    if CFG.FaceAway then
+        if lookAwayActive(now) then
+            if now >= S.lookUntil then log("look away detected") end
+            S.lookUntil = now + CFG.LookHold
+        end
+        if now < S.lookUntil and (boss or S.bossPos) then lookAway = true end
+    end
+    if lookAway then
+        local bp = boss and boss.root.Position or S.bossPos
+        local away = (pos - bp) * flat
+        if away.Magnitude < 0.1 then away = Vector3.new(1, 0, 0) end
+        if now >= S.aimOff then Aim.face(away) end
+        Cam.snap(pos + away.Unit * 60)
+    end
+
+    local zs = {}
+    if CFG.DodgeZones then zs = Dodger.snapshot(now) end
+    drawDebug(zs, now)
+    local speed = math.max(hum.WalkSpeed, 8)
+    local has = Dodger.has(zs)
+    local unsafe = has and Dodger.unsafe(zs, pos, now)
+    local holdSafe = has and not unsafe and Dodger.safePending(zs, now)
+    if not has then S.dGoal = nil end
+    Combat.speedTick(now, hum, hrp, unsafe)
+
+    if target then
+        local tpos = target.root.Position
+        local orbitR = target.boss and CFG.BossOrbit or CFG.OrbitRadius
+        if CFG.ContAim and not lookAway then Aim.face(tpos - pos) end
+        local dist = ((tpos - pos) * flat).Magnitude
+        local near = dist <= orbitR + 14
+        local moving = false
+        local dodging = false
+        local holding = false
+        if unsafe then
+            dodging = true
+            local goal = Dodger.goal(pos, speed, nil, tpos, orbitR, zs, now)
+            if goal then
+                goTo(hum, hrp, goal, pos)
+                moving = true
+            end
+            dodgeWatch(now, pos, hum)
+        elseif holdSafe then
+            Mover.clear()
+            hum:MoveTo(pos)
+            holding = true
+        elseif near then
+            Mover.clear()
+            if CFG.Orbit then
+                local desired = orbitGoal(pos, tpos, orbitR)
+                local safe = true
+                if has then
+                    local dd = ((desired - pos) * flat).Magnitude
+                    local m = Dodger.eval(zs, desired.X, desired.Z, now + dd / speed)
+                    safe = m >= 0
+                end
+                if safe then
+                    local w = walkable(pos, desired, rayParams())
+                    if w then
+                        hum:MoveTo(w)
+                        moving = true
+                    else
+                        S.orbitDir = -S.orbitDir
+                        local rel = (pos - tpos) * flat
+                        if rel.Magnitude < 1 then rel = Vector3.new(1, 0, 0) end
+                        Mover.setGoal(tpos + rel.Unit * orbitR, ringAlts(tpos, orbitR, pos))
+                        moving = Mover.step(hum, hrp) ~= nil
+                    end
+                else
+                    local goal = Dodger.goal(pos, speed, desired, tpos, orbitR, zs, now)
+                    if goal then
+                        goTo(hum, hrp, goal, pos)
+                        moving = true
+                    else
+                        hum:MoveTo(pos)
+                        holding = true
+                    end
+                end
+            else
+                hum:MoveTo(pos)
+            end
+        else
+            local rel = (pos - tpos) * flat
+            if rel.Magnitude < 1 then rel = Vector3.new(1, 0, 0) end
+            Mover.setGoal(tpos + rel.Unit * orbitR, ringAlts(tpos, orbitR, pos))
+            moving = true
+            if Mover.step(hum, hrp) == "stuck" then
+                S.black[target.h] = now + 8
+                Mover.clear()
+                log("target blacklisted: path stuck")
+            end
+        end
+        S.wantMove = moving
+        if lookAway then
+            S.state = dodging and "LOOK AWAY + DODGE" or "LOOK AWAY"
+        elseif dodging then
+            S.state = "DODGE"
+        elseif holdSafe then
+            S.state = "SAFE CIRCLE"
+            if near then Combat.cast(now, hum, hrp, tpos) end
+        elseif near then
+            S.state = (target.boss and "BOSS " or "") .. (holding and "HOLD" or "ORBIT")
+            Combat.cast(now, hum, hrp, tpos)
+        else
+            S.state = target.boss and "BOSS APPROACH" or "APPROACH"
+        end
+        watchProgress(now, pos, target, hum)
+        return
+    end
+
+    S.wantMove = false
+
+    if unsafe then
+        local goal = Dodger.goal(pos, speed, nil, nil, CFG.OrbitRadius, zs, now)
+        dodgeWatch(now, pos, hum)
+        if goal then
+            S.state = lookAway and "LOOK AWAY + DODGE" or "DODGE"
+            goTo(hum, hrp, goal, pos)
+            return
+        end
+    end
+    if holdSafe then
+        S.state = lookAway and "LOOK AWAY" or "SAFE CIRCLE"
+        Mover.clear()
+        hum:MoveTo(pos)
+        return
+    end
+
+    local rg, haveRooms, ralts = nil, false, nil
+    if CFG.AutoNav then rg, haveRooms, ralts = nextRoomGoal(pos, now) end
+    if rg then
+        S.state = lookAway and "LOOK AWAY" or ("NEXT ROOM " .. tostring(S.room))
+        Mover.setGoal(rg, ralts)
+        if Mover.step(hum, hrp) == "stuck" then
+            S.roomStuck = (S.roomStuck or 0) + 1
+            Mover.clear()
+            if S.roomStuck >= 3 then
+                S.roomStuck = 0
+                for _, r in ipairs(roomsInfo()) do
+                    if not S.roomDone[r.name] then
+                        S.roomDone[r.name] = true
+                        log("room skipped (stuck): " .. r.name)
+                        break
+                    end
+                end
+            end
+        end
+        return
+    end
+    if haveRooms then
+        S.state = lookAway and "LOOK AWAY" or "WAITING IN ROOM"
+        Mover.clear()
+        return
+    end
+
+    S.state = "WAITING"
+    Mover.clear()
+end
+
+local function inDungeon(pos)
+    if game.PlaceId == CFG.DungeonPlace then return true end
+    if game.PlaceId == CFG.LobbyPlace then return false end
+    return #Scanner.list(pos) > 0
+end
+
+local function tryFinish(leave)
+    if Gui.find(CFG.EndTexts, false) then
+        for _, b in ipairs(CFG.EndButtons) do
+            local g = Gui.find({ b }, true)
+            if g then
+                log("finish click: " .. b)
+                press(toButton(g), true)
+                return true
+            end
+        end
+    end
+    local conf = Gui.find({ "yes", "confirm" }, true)
+    if conf and os.clock() >= S.nextConfirm then
+        S.nextConfirm = os.clock() + 3
+        log("confirm click")
+        press(toButton(conf), true)
+        return true
+    end
+    if leave then
+        local btn = child(pgui(), "mainInterface", "buttons", "optionsButton", "ReturnToLobbyButton")
+        if btn then
+            log("return to lobby button")
+            press(btn, false)
+            return true
+        end
+    end
+    return false
+end
+
+local function promptPos(pr)
+    local par = pr.Parent
+    if not par then return nil end
+    if par:IsA("BasePart") then return par.Position end
+    if par:IsA("Attachment") then return par.WorldPosition end
+    if par:IsA("Model") then return par:GetPivot().Position end
+    return nil
+end
+
+local function findPrompt(words)
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled then
+            local par = d.Parent
+            local hay = (d.ObjectText .. " " .. d.ActionText .. " " .. (par and par.Name or "") .. " " .. ((par and par.Parent) and par.Parent.Name or "")):lower()
+            for _, w in ipairs(words) do
+                if hay:find(w, 1, true) then return d end
+            end
+        end
+    end
+    return nil
+end
+
+local function triggerPrompt(pr)
+    if fireproximityprompt then
+        pcall(fireproximityprompt, pr)
+    else
+        Input.key(pr.KeyboardKeyCode, pr.HoldDuration + 0.25)
+    end
+end
+
+local function dungeonStartStep(hum, hrp, now)
+    if now >= S.nextStartTry then
+        S.nextStartTry = now + jitter(1.8, 2.8)
+        local sb = child(pgui(), "queueGui", "lobbyInfo", "startBackground", "startFrame", "startButton")
+        if sb and isShown(sb) then
+            log("dungeon start: party start button")
+            press(sb, false)
+            return
+        end
+        local g = Gui.find({ "start", "start dungeon", "start game", "begin", "ready" }, true)
+        if g then
+            log("dungeon start: " .. trimText(g))
+            press(toButton(g), false)
+            return
+        end
+    end
+    local waited = now - (S.waitT or now)
+    if waited > 4 then
+        if now >= S.nextPromptScan then
+            S.nextPromptScan = now + 8
+            S.startPrompt = findPrompt({ "start", "begin", "ready" })
+        end
+        local pr = S.startPrompt
+        if pr and pr.Parent then
+            local pp = promptPos(pr)
+            if pp then
+                local d = ((pp - hrp.Position) * Vector3.new(1, 0, 1)).Magnitude
+                if d > 8 then
+                    Mover.setGoal(pp)
+                    Mover.step(hum, hrp)
+                else
+                    Mover.clear()
+                    if now >= S.nextPrompt then
+                        S.nextPrompt = now + 4
+                        log("dungeon start: prompt")
+                        triggerPrompt(pr)
+                    end
+                end
+                return
+            end
+        end
+    end
+    if waited > 15 and now >= S.nextHost then
+        S.nextHost = now + 20
+        local hb = child(pgui(), "mainInterface", "buttons", "optionsButton", "HostButton")
+        if hb and isShown(hb) then
+            log("dungeon start: host button")
+            press(hb, false)
+        end
+    end
+end
+
+local function lobbyFlow(now)
+    local qg = child(pgui(), "queueGui")
+    local info = child(qg, "lobbyInfo")
+    local cd = child(qg, "chooseDungeon")
+    local sel = child(qg, "selectOption")
+    local function go(key, btn, idem, gap)
+        if not btn then return false end
+        if S.clicked[key] and now - S.clicked[key] < (gap or 4) then return true end
+        S.clicked[key] = now
+        log("lobby: " .. key)
+        press(btn, idem)
+        return true
+    end
+    if info and isShown(info) then
+        return go("lobbyStart", child(info, "startBackground", "startFrame", "startButton"), false, 6)
+    end
+    if cd and isShown(cd) then
+        local mid = child(cd, "backgroundFillMiddle", "dungeonName")
+        local picked = mid and mid:IsA("TextLabel") and trimText(mid):find("gilded", 1, true)
+        if not picked and S.dungeonTries < 4 then
+            if now - S.lastDiff > 1.5 then
+                S.lastDiff = now
+                S.dungeonTries = S.dungeonTries + 1
+                log("lobby: dungeon Gilded Skies")
+                press(child(cd, "backgroundFillLeft", "ScrollingFrame", "Gilded Skies", "TextButton"), true)
+            end
+            return true
+        end
+        if S.diffTries < 2 then
+            if now - S.lastDiff > 1.5 then
+                S.lastDiff = now
+                S.diffTries = S.diffTries + 1
+                log("lobby: difficulty " .. CFG.Difficulty)
+                press(child(cd, "backgroundFillRight", "difficultyPanel", CFG.Difficulty, "TextButton"), true)
+            end
+            return true
+        end
+        return go("create lobby", child(cd, "backgroundFillMiddle", "startMain", "TextButton"), false, 5)
+    end
+    S.diffTries = 0
+    S.dungeonTries = 0
+    if sel and isShown(sel) then
+        return go("create", child(sel, "Frame", "createGame"), false, 4)
+    end
+    return go("play", child(pgui(), "mainInterface", "buttons", "playButton"), false, 6)
+end
+
+local function startRun()
+    S.runStart = os.clock()
+    S.runs = S.runs + 1
+    writeFile("DQR_runs.txt", S.runs)
+    S.runDeaths = 0
+    S.lastEnemyT = S.runStart
+    S.black = {}
+    S.target = nil
+    S.roomDone = {}
+    S.roomSince = {}
+    S.roomIdle = {}
+    S.lookUntil = 0
+    S.bossPos = nil
+    Mover.clear()
+    log("run started")
+end
+
+local function endRun()
+    local elapsed = os.clock() - S.runStart
+    S.runStart = nil
+    S.waitT = nil
+    Mover.clear()
+    if elapsed > 40 then
+        S.lastClear = elapsed
+        S.breakUntil = os.clock() + jitter(CFG.BreakMin, CFG.BreakMax)
+        log(string.format("run %d finished in %.0fs", S.runs, elapsed))
+        if CFG.MaxRuns > 0 and S.runs >= CFG.MaxRuns then Stop("max runs reached") end
+    end
+end
+
+local function step()
+    local _, hum, hrp = getChar()
+    if not hrp then
+        S.state = "DEAD / LOADING"
+        return
+    end
+    local now = os.clock()
+    local pos = hrp.Position
+    if now < S.breakUntil then
+        S.state = "BREAK"
+        if now >= S.nextJump then
+            S.nextJump = now + jitter(25, 70)
+            hum.Jump = true
+        end
+        return
+    end
+    S.dungeon = (game.PlaceId == CFG.DungeonPlace)
+    if inDungeon(pos) then
+        local ds = workspace:FindFirstChild("dungeonStarted")
+        local st = workspace:FindFirstChild("start")
+        local started = true
+        if ds and ds:IsA("BoolValue") and not ds.Value then started = false end
+        if st and st:IsA("BoolValue") and not st.Value then started = false end
+        if not S.runStart and not started then
+            S.waitT = S.waitT or now
+            if now - S.waitT < 90 then
+                S.state = "WAIT START"
+                dungeonStartStep(hum, hrp, now)
+                return
+            end
+        end
+        if not S.runStart then startRun() end
+        local elapsed = now - S.runStart
+        local fin = child(workspace, "dungeon", "bossRoom", "dungeonFinished")
+        if fin and fin:IsA("BoolValue") and fin.Value then
+            S.state = "FINISHED"
+            Mover.clear()
+            if now >= S.nextEnd then
+                S.nextEnd = now + 3
+                tryFinish(true)
+            end
+            return
+        end
+        if elapsed > CFG.RunTimeout and now >= S.nextEnd then
+            S.nextEnd = now + 3
+            if not tryFinish(true) and elapsed > CFG.RunTimeout + 150 then
+                Stop("run timeout, could not leave the dungeon")
+                return
+            end
+        end
+        if now - S.lastEnemyT > 6 and elapsed > 45 and now >= S.nextEnd then
+            S.nextEnd = now + 2
+            tryFinish(now - S.lastEnemyT > 75 and elapsed > 150 and not roomsPending())
+        end
+        brain(hum, hrp)
+    else
+        if S.runStart then endRun() end
+        if CFG.MaxRuns > 0 and S.runs >= CFG.MaxRuns then
+            Stop("max runs reached")
+            return
+        end
+        if S.resumed and not S.lobbyBreak then
+            S.lobbyBreak = true
+            S.breakUntil = now + jitter(CFG.BreakMin, CFG.BreakMax)
+            return
+        end
+        S.state = "LOBBY"
+        if CFG.AutoEnter then lobbyFlow(now) end
+    end
+end
+
+local function mainLoop()
+    while S.running and alive do
+        local ok, err = pcall(step)
+        if ok then
+            S.errs = 0
+        else
+            S.errs = S.errs + 1
+            log("step error: " .. tostring(err))
+            if S.errs > 25 then Stop("too many errors, dump recon and send it") end
+        end
+        task.wait(jitter(0.07, 0.11))
+    end
+end
+
+local function queueReload()
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if not q or CFG.ScriptURL == "" then return false end
+    local code = string.format("if not game:IsLoaded() then game.Loaded:Wait() end task.wait(2) loadstring(game:HttpGet(%q))()", CFG.ScriptURL)
+    local ok = pcall(q, code)
+    if ok then S.queued = true end
+    return ok
+end
+
+local function stopCore(reason, keepFlag)
+    local was = S.running
+    S.running = false
+    S.state = "OFF"
+    Mover.clear()
+    Aim.release()
+    local _, hum, hrp = getChar()
+    if hum then
+        hum.AutoRotate = true
+        if hrp then hum:MoveTo(hrp.Position) end
+    end
+    if was and not keepFlag then writeFile("DQR_autostart.txt", "0") end
+    if was and reason then notify("Autofarm stopped", reason, 8) end
+    log("stopped: " .. tostring(reason))
+end
+
+function Start()
+    if S.running then return end
+    S.running = true
+    S.state = "STARTING"
+    writeFile("DQR_autostart.txt", "1")
+    if not queueReload() then
+        notify("Heads up", "queue_on_teleport missing: re-run the loader after each teleport.", 8)
+    end
+    task.spawn(mainLoop)
+end
+
+function Stop(reason)
+    stopCore(reason, false)
+end
+
+local function onDeath()
+    if not S.running then return end
+    S.deaths = S.deaths + 1
+    S.runDeaths = S.runDeaths + 1
+    log("died (run deaths " .. S.runDeaths .. ")")
+    if S.runDeaths >= CFG.MaxDeathsPerRun then
+        Stop("died " .. S.runDeaths .. " times in one run")
+    end
+end
+
+local function hookChar(c)
+    local h = c:WaitForChild("Humanoid", 10)
+    if h then track(h.Died:Connect(onDeath)) end
+end
+if LP.Character then task.spawn(hookChar, LP.Character) end
+track(LP.CharacterAdded:Connect(hookChar))
+
+track(LP.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end))
+
+track(LP.OnTeleport:Connect(function(state)
+    if S.running and state == Enum.TeleportState.Started then
+        writeFile("DQR_autostart.txt", "1")
+        if not S.queued then queueReload() end
+    end
+end))
+
+track(RunService.Heartbeat:Connect(function()
+    pcall(Aim.update)
+end))
+
+task.spawn(function()
+    while alive do
+        if not S.running then pcall(Dodger.snapshot, os.clock()) end
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    local pg = LP:WaitForChild("PlayerGui")
+    for _, d in ipairs(pg:GetDescendants()) do trackGui(d) end
+    track(pg.DescendantAdded:Connect(trackGui))
+    track(pg.DescendantRemoving:Connect(function(d) Gui.labels[d] = nil end))
+end)
+
+for _, d in ipairs(workspace:GetDescendants()) do
+    if d:IsA("Humanoid") then onDesc(d) end
+end
+track(workspace.DescendantAdded:Connect(onDesc))
+
+local function Destroy()
+    alive = false
+    stopCore(nil, true)
+    for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    pcall(function()
+        if Aim.ao then Aim.ao:Destroy() end
+        if Aim.att then Aim.att:Destroy() end
+    end)
+    for p, a in pairs(Dodger.adorns) do pcall(function() a:Destroy() end) Dodger.adorns[p] = nil end
+    pcall(function() RunService:Set3dRenderingEnabled(true) end)
+    if uiDestroy then pcall(uiDestroy) end
+end
+
+G.ExodusDQR = { CFG = CFG, Start = Start, Stop = Stop, Destroy = Destroy, Log = logbuf }
+
+local function resumeFarm(toggle)
+    S.runs = tonumber(readFile("DQR_runs.txt")) or 0
+    S.resumed = true
+    log("resume flag found, restarting farm")
+    task.spawn(function()
+        local t = 0
+        while alive and not LP.Character and t < 30 do
+            task.wait(0.5)
+            t = t + 0.5
+        end
+        task.wait(2)
+        if alive and not S.running then
+            Start()
+            notify("Exodus", "Farm resumed after teleport", 5)
+            if toggle then pcall(toggle.Set, true, true) end
+        end
+    end)
+end
+
+local TweenService = game:GetService("TweenService")
+local UIS = game:GetService("UserInputService")
+
+local UI = {
+    reg = {}, regList = {}, defaults = {}, rows = {}, tabs = {}, tabList = {}, updaters = {},
+    anim = true, notif = true, ready = false, saving = false, capturing = false,
+    keys = { menu = Enum.KeyCode.RightShift, farm = Enum.KeyCode.F6, panic = Enum.KeyCode.P },
+}
+
+local Theme = {
+    bg = Color3.fromRGB(5, 6, 8), s1 = Color3.fromRGB(10, 12, 16), s2 = Color3.fromRGB(14, 17, 22), s3 = Color3.fromRGB(20, 24, 31),
+    ln = Color3.fromRGB(26, 31, 39), ln2 = Color3.fromRGB(39, 46, 57), tx = Color3.fromRGB(230, 234, 240),
+    mu = Color3.fromRGB(123, 135, 148), dm = Color3.fromRGB(74, 83, 97), em = Color3.fromRGB(91, 155, 255),
+    em2 = Color3.fromRGB(47, 109, 246), rd = Color3.fromRGB(255, 93, 108), white = Color3.fromRGB(255, 255, 255),
+}
+
+local function mk(class, props, parent)
+    local o = Instance.new(class)
+    if props then
+        for k, v in pairs(props) do o[k] = v end
+    end
+    if parent then o.Parent = parent end
+    return o
+end
+
+local function round(o, r) return mk("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+
+local function outline(o, col, th)
+    return mk("UIStroke", { Color = col, Thickness = th or 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, o)
+end
+
+local function pad(o, l, r, t, b)
+    return mk("UIPadding", {
+        PaddingLeft = UDim.new(0, l or 0), PaddingRight = UDim.new(0, r or 0),
+        PaddingTop = UDim.new(0, t or 0), PaddingBottom = UDim.new(0, b or 0),
+    }, o)
+end
+
+local function tw(o, t, props)
+    if not UI.anim then
+        for k, v in pairs(props) do o[k] = v end
+        return
+    end
+    TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+end
+
+local function txt(parent, str, size, col, font, xa)
+    return mk("TextLabel", {
+        BackgroundTransparency = 1, Text = str, TextSize = size, TextColor3 = col, Font = font or Enum.Font.GothamMedium,
+        TextXAlignment = xa or Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center, BorderSizePixel = 0,
+    }, parent)
+end
+
+local function regSet(flag, get, set)
+    UI.reg[flag] = { get = get, set = set }
+    UI.regList[#UI.regList + 1] = flag
+    local ok, v = pcall(get)
+    if ok then UI.defaults[flag] = v end
+end
+
+local function snapshotSettings()
+    local t = {}
+    for _, f in ipairs(UI.regList) do
+        local ok, v = pcall(UI.reg[f].get)
+        if ok and v ~= nil then t[f] = v end
+    end
+    return t
+end
+
+local function applySettings(t)
+    for f, v in pairs(t) do
+        local r = UI.reg[f]
+        if r then pcall(r.set, v) end
+    end
+end
+
+function UI.queueSave()
+    if UI.saving or not UI.ready then return end
+    UI.saving = true
+    task.delay(1, function()
+        UI.saving = false
+        writeFile("DQR_settings.json", HttpService:JSONEncode(snapshotSettings()))
+    end)
+end
+
+function UI.closeMenu()
+    if UI.menu then
+        UI.menu:Destroy()
+        UI.menu = nil
+        UI.menuAnchor = nil
+    end
+end
+
+function UI.openMenu(anchor, options, current, pick)
+    UI.closeMenu()
+    local win = UI.win
+    local sc = UI.scale.Scale
+    local rel = (anchor.AbsolutePosition - win.AbsolutePosition) / sc
+    local w = anchor.AbsoluteSize.X / sc
+    local h = #options * 26 + 8
+    local y = rel.Y + anchor.AbsoluteSize.Y / sc + 4
+    if y + h > 534 then y = rel.Y - h - 4 end
+    local m = mk("Frame", {
+        Size = UDim2.fromOffset(w, h), Position = UDim2.fromOffset(rel.X, y), BackgroundColor3 = Theme.s3,
+        BorderSizePixel = 0, ZIndex = 60,
+    }, win)
+    round(m, 8)
+    outline(m, Theme.ln2)
+    pad(m, 4, 4, 4, 4)
+    mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, m)
+    for i, opt in ipairs(options) do
+        local b = mk("TextButton", {
+            Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = Theme.em, BackgroundTransparency = 1, Text = tostring(opt),
+            TextSize = 12, Font = Enum.Font.GothamMedium, TextColor3 = (opt == current) and Theme.em or Theme.tx,
+            ZIndex = 61, LayoutOrder = i, AutoButtonColor = false, BorderSizePixel = 0,
+        }, m)
+        round(b, 6)
+        b.MouseEnter:Connect(function() b.BackgroundTransparency = 0.85 end)
+        b.MouseLeave:Connect(function() b.BackgroundTransparency = 1 end)
+        b.MouseButton1Click:Connect(function()
+            UI.closeMenu()
+            pick(opt)
+        end)
+    end
+    UI.menu = m
+    UI.menuAnchor = anchor
+end
+
+local Card = {}
+Card.__index = Card
+
+local function newRow(card, o, h)
+    card.n = card.n + 1
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, h), BackgroundTransparency = 1, LayoutOrder = card.n, BorderSizePixel = 0 }, card.frame)
+    if card.n > 2 then
+        mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = Theme.white, BackgroundTransparency = 0.965, BorderSizePixel = 0 }, row)
+    end
+    local nameL = txt(row, o.name, 12, Theme.tx, Enum.Font.GothamMedium)
+    local descL
+    if o.desc then
+        nameL.Position = UDim2.fromOffset(0, 7)
+        nameL.Size = UDim2.new(0.6, 0, 0, 16)
+        descL = txt(row, o.desc, 10.5, Theme.mu, Enum.Font.Gotham)
+        descL.Position = UDim2.fromOffset(0, 24)
+        descL.Size = UDim2.new(0.62, 0, 0, 14)
+    else
+        nameL.Position = UDim2.fromOffset(0, 0)
+        nameL.Size = UDim2.new(0.6, 0, 1, 0)
+    end
+    UI.rows[#UI.rows + 1] = { nameL = nameL, descL = descL, key = (o.name .. " " .. (o.desc or "")):lower() }
+    return row, nameL
+end
+
+function Card:Toggle(o)
+    local row = newRow(self, o, o.desc and 46 or 36)
+    local track = mk("TextButton", {
+        Text = "", AutoButtonColor = false, Size = UDim2.fromOffset(38, 20), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = Theme.s3, BorderSizePixel = 0,
+    }, row)
+    round(track, 10)
+    local st = outline(track, Theme.ln2)
+    local knob = mk("Frame", {
+        Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 3, 0.5, 0),
+        BackgroundColor3 = Theme.mu, BorderSizePixel = 0,
+    }, track)
+    round(knob, 7)
+    local w = { value = false }
+    function w.Set(v, silent)
+        w.value = v and true or false
+        tw(track, 0.2, { BackgroundColor3 = w.value and Theme.em2 or Theme.s3 })
+        tw(knob, 0.2, {
+            Position = w.value and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+            BackgroundColor3 = w.value and Theme.white or Theme.mu,
+        })
+        st.Color = w.value and Theme.em2 or Theme.ln2
+        if not silent then
+            if o.set then o.set(w.value) end
+            UI.queueSave()
+        end
+    end
+    track.MouseButton1Click:Connect(function() w.Set(not w.value) end)
+    if o.get then w.Set(o.get(), true) end
+    if o.flag then regSet(o.flag, o.get, function(v) w.Set(v) end) end
+    return w
+end
+
+function Card:Slider(o)
+    self.n = self.n + 1
+    local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1, LayoutOrder = self.n, BorderSizePixel = 0 }, self.frame)
+    if self.n > 2 then
+        mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = Theme.white, BackgroundTransparency = 0.965, BorderSizePixel = 0 }, row)
+    end
+    local nameL = txt(row, o.name, 12, Theme.tx, Enum.Font.GothamMedium)
+    nameL.Position = UDim2.fromOffset(0, 8)
+    nameL.Size = UDim2.new(0.65, 0, 0, 16)
+    local valL = txt(row, "", 11, Theme.em, Enum.Font.Code, Enum.TextXAlignment.Right)
+    valL.Position = UDim2.new(0.5, 0, 0, 8)
+    valL.Size = UDim2.new(0.5, 0, 0, 16)
+    UI.rows[#UI.rows + 1] = { nameL = nameL, valL = valL, key = (o.name .. " " .. (o.desc or "")):lower() }
+    local hit = mk("TextButton", {
+        Text = "", AutoButtonColor = false, BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 0, 20),
+        BorderSizePixel = 0,
+    }, row)
+    local bar = mk("Frame", { Size = UDim2.new(1, 0, 0, 5), Position = UDim2.new(0, 0, 0.5, -2), BackgroundColor3 = Theme.s3, BorderSizePixel = 0 }, hit)
+    round(bar, 3)
+    local fill = mk("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = Theme.em2, BorderSizePixel = 0 }, bar)
+    round(fill, 3)
+    local knob = mk("Frame", {
+        Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+        BackgroundColor3 = Theme.white, BorderSizePixel = 0, ZIndex = 3,
+    }, bar)
+    round(knob, 7)
+    outline(knob, Theme.em, 2)
+    local step = o.step or 1
+    local decimals = 0
+    if step < 1 then decimals = (step >= 0.1) and 1 or 2 end
+    local w = { value = o.min }
+    function w.Set(v, silent)
+        v = tonumber(v) or o.min
+        v = math.clamp(v, o.min, o.max)
+        v = o.min + math.floor((v - o.min) / step + 0.5) * step
+        v = math.clamp(v, o.min, o.max)
+        w.value = v
+        local r = (o.max > o.min) and (v - o.min) / (o.max - o.min) or 0
+        fill.Size = UDim2.new(r, 0, 1, 0)
+        knob.Position = UDim2.new(r, 0, 0.5, 0)
+        valL.Text = string.format("%." .. decimals .. "f", v) .. (o.suffix or "")
+        if not silent then
+            if o.set then o.set(v) end
+            UI.queueSave()
+        end
+    end
+    local function fromPos(p)
+        local r = math.clamp((p.X - hit.AbsolutePosition.X) / math.max(hit.AbsoluteSize.X, 1), 0, 1)
+        w.Set(o.min + r * (o.max - o.min))
+    end
+    hit.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            UI.drag = fromPos
+            fromPos(i.Position)
+        end
+    end)
+    if o.get then w.Set(o.get(), true) end
+    if o.flag then regSet(o.flag, o.get, function(v) w.Set(v) end) end
+    return w
+end
+
+function Card:Dropdown(o)
+    local row = newRow(self, o, o.desc and 46 or 36)
+    local btn = mk("TextButton", {
+        Text = "", AutoButtonColor = false, Size = UDim2.fromOffset(150, 26), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0,
+    }, row)
+    round(btn, 8)
+    local st = outline(btn, Theme.ln2)
+    local lbl = txt(btn, "", 12, Theme.tx, Enum.Font.GothamMedium)
+    lbl.Position = UDim2.fromOffset(10, 0)
+    lbl.Size = UDim2.new(1, -28, 1, 0)
+    local arrow = txt(btn, "v", 11, Theme.mu, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -22, 0, 0)
+    arrow.Size = UDim2.fromOffset(18, 26)
+    local w = { value = o.options[1] }
+    function w.Set(v, silent)
+        w.value = v
+        lbl.Text = tostring(v)
+        if not silent then
+            if o.set then o.set(v) end
+            UI.queueSave()
+        end
+    end
+    btn.MouseButton1Click:Connect(function()
+        if UI.menu and UI.menuAnchor == btn then
+            UI.closeMenu()
+            return
+        end
+        UI.openMenu(btn, o.options, w.value, function(v) w.Set(v) end)
+    end)
+    btn.MouseEnter:Connect(function() st.Color = Theme.em2 end)
+    btn.MouseLeave:Connect(function() st.Color = Theme.ln2 end)
+    if o.get then w.Set(o.get(), true) end
+    if o.flag then regSet(o.flag, o.get, function(v) w.Set(v) end) end
+    return w
+end
+
+function Card:Keybind(o)
+    local row = newRow(self, o, o.desc and 46 or 36)
+    local btn = mk("TextButton", {
+        Text = "", AutoButtonColor = false, Size = UDim2.fromOffset(110, 26), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0, TextSize = 11,
+        Font = Enum.Font.Code, TextColor3 = Theme.em,
+    }, row)
+    round(btn, 7)
+    local st = outline(btn, Theme.ln2)
+    local w = { value = "None" }
+    function w.Set(v, silent)
+        w.value = v
+        btn.Text = tostring(v)
+        btn.TextColor3 = Theme.em
+        st.Color = Theme.ln2
+        if not silent then
+            if o.set then o.set(v) end
+            UI.queueSave()
+        end
+    end
+    btn.MouseButton1Click:Connect(function()
+        if UI.capturing then return end
+        UI.capturing = true
+        btn.Text = "Press a key..."
+        btn.TextColor3 = Theme.mu
+        st.Color = Theme.em
+        local conn
+        conn = UIS.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.Keyboard then
+                conn:Disconnect()
+                UI.capturing = false
+                if i.KeyCode == Enum.KeyCode.Escape then w.Set(w.value, true) else w.Set(i.KeyCode.Name) end
+            end
+        end)
+    end)
+    if o.get then w.Set(o.get(), true) end
+    if o.flag then regSet(o.flag, o.get, function(v) w.Set(v) end) end
+    return w
+end
+
+function Card:Button(o)
+    local row = newRow(self, o, o.desc and 46 or 38)
+    local primary = o.style == "primary"
+    local danger = o.style == "danger"
+    local btn = mk("TextButton", {
+        Text = o.text or o.name, AutoButtonColor = false, Size = UDim2.fromOffset(o.width or 120, 28), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = primary and Theme.em2 or Theme.s3, BorderSizePixel = 0,
+        TextSize = 12, Font = primary and Enum.Font.GothamBold or Enum.Font.GothamMedium,
+        TextColor3 = danger and Theme.rd or Theme.white,
+    }, row)
+    round(btn, 7)
+    local st = outline(btn, primary and Theme.em2 or (danger and Color3.fromRGB(110, 50, 58) or Theme.ln2))
+    btn.MouseEnter:Connect(function() st.Color = danger and Theme.rd or (primary and Theme.em or Theme.dm) end)
+    btn.MouseLeave:Connect(function() st.Color = primary and Theme.em2 or (danger and Color3.fromRGB(110, 50, 58) or Theme.ln2) end)
+    btn.MouseButton1Click:Connect(function()
+        if o.cb then
+            local ok, err = pcall(o.cb, btn)
+            if not ok then log("button error: " .. tostring(err)) end
+        end
+    end)
+    return btn
+end
+
+function Card:Info(o)
+    local row = newRow(self, o, o.desc and 46 or 32)
+    local valL = txt(row, "", 11.5, Theme.mu, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+    valL.AnchorPoint = Vector2.new(1, 0.5)
+    valL.Position = UDim2.new(1, 0, 0.5, 0)
+    valL.Size = UDim2.new(0.5, 0, 1, 0)
+    local w = {}
+    function w.Set(t) valL.Text = tostring(t) end
+    if o.get then
+        UI.updaters[#UI.updaters + 1] = function() w.Set(o.get()) end
+        w.Set(o.get())
+    end
+    return w
+end
+
+function Card:Input(o)
+    local row = newRow(self, o, 42)
+    local box = mk("TextBox", {
+        Text = "", PlaceholderText = o.placeholder or "", PlaceholderColor3 = Theme.dm, TextColor3 = Theme.tx, TextSize = 12,
+        Font = Enum.Font.GothamMedium, Size = UDim2.fromOffset(180, 28), AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, 0, 0.5, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0, ClearTextOnFocus = false,
+    }, row)
+    round(box, 7)
+    local st = outline(box, Theme.ln2)
+    box.Focused:Connect(function() st.Color = Theme.em2 end)
+    box.FocusLost:Connect(function() st.Color = Theme.ln2 end)
+    return box
+end
+
+local Tab = {}
+Tab.__index = Tab
+
+function Tab:Card(title)
+    local frame = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.s1, BorderSizePixel = 0,
+        LayoutOrder = #self.cards + 2,
+    }, self.page)
+    round(frame, 8)
+    outline(frame, Theme.ln)
+    mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, frame)
+    pad(frame, 14, 14, 0, 6)
+    local tl = txt(frame, title, 12.5, Theme.tx, Enum.Font.GothamBold)
+    tl.Size = UDim2.new(1, 0, 0, 36)
+    tl.LayoutOrder = 0
+    mk("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = Theme.ln, BorderSizePixel = 0, LayoutOrder = 1 }, frame)
+    local card = setmetatable({ frame = frame, n = 1, title = title }, Card)
+    self.cards[#self.cards + 1] = card
+    return card
+end
+
+local LOGO_CHUNKS = {
+    "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",
+}
+
+local BUTTON_CHUNKS = {
+    "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",
+}
+
+local B64CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64MAP = {}
+for i = 1, #B64CHARS do B64MAP[B64CHARS:sub(i, i)] = i - 1 end
+
+local function b64decode(str)
+    local out = {}
+    local acc, bits = 0, 0
+    for i = 1, #str do
+        local v = B64MAP[str:sub(i, i)]
+        if v then
+            acc = acc * 64 + v
+            bits = bits + 6
+            if bits >= 8 then
+                bits = bits - 8
+                local byte = math.floor(acc / 2 ^ bits)
+                acc = acc - byte * 2 ^ bits
+                out[#out + 1] = string.char(byte)
+            end
+        end
+    end
+    return table.concat(out)
+end
+
+local function loadAsset(fileName, chunkList)
+    local getAsset = getcustomasset or getsynasset
+    if not getAsset or not writefile then return nil end
+    local ok, res = pcall(function()
+        ensureFolder()
+        local path = CFG.Folder .. "/" .. fileName
+        writefile(path, b64decode(table.concat(chunkList)))
+        return getAsset(path)
+    end)
+    if ok and res and res ~= "" then return res end
+    return nil
+end
+
+local function fmtTime(sec)
+    sec = math.max(0, math.floor(sec))
+    return string.format("%02d:%02d:%02d", math.floor(sec / 3600), math.floor(sec / 60) % 60, sec % 60)
+end
+
+local function farmSet(v)
+    if v then
+        if not S.resumed then
+            S.runs = 0
+            writeFile("DQR_runs.txt", 0)
+        end
+        Start()
+    else
+        Stop()
+    end
+end
+
+local function applyPerf()
+    pcall(function() settings().Rendering.QualityLevel = CFG.LowQuality and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic end)
+    pcall(function() game:GetService("Lighting").GlobalShadows = not CFG.NoShadows end)
+    pcall(function() RunService:Set3dRenderingEnabled(not CFG.No3D) end)
+    if setfpscap then pcall(setfpscap, CFG.FpsCapOn and CFG.FpsCap or 0) end
+end
+
+local KEYS = { "Q", "E", "R", "F", "Z", "X", "C", "V", "T", "G" }
+
+local function cfgFile(name) return "DQR_cfg_" .. name .. ".json" end
+
+local function loadIndex()
+    local raw = readFile("DQR_cfgindex.json")
+    if not raw then return {} end
+    local ok, t = pcall(function() return HttpService:JSONDecode(raw) end)
+    if ok and type(t) == "table" then return t end
+    return {}
+end
+
+local function saveIndex(t) writeFile("DQR_cfgindex.json", HttpService:JSONEncode(t)) end
+
+local function buildUI()
+    local gui = mk("ScreenGui", {
+        Name = "ExodusUI", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true,
+        DisplayOrder = 1000,
+    })
+    local okp = pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
+    if not okp or not gui.Parent then gui.Parent = pgui() end
+    UI.gui = gui
+
+    local win = mk("Frame", {
+        Name = "Window", Size = UDim2.fromOffset(900, 540), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ClipsDescendants = true,
+    }, gui)
+    round(win, 10)
+    outline(win, Theme.ln2)
+    local scale = mk("UIScale", { Scale = 1 }, win)
+    UI.win = win
+    UI.scale = scale
+    local function fit()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local vp = cam.ViewportSize
+        scale.Scale = math.max(0.4, math.min(1, (vp.X - 16) / 900, (vp.Y - 16) / 540))
+    end
+    fit()
+    if workspace.CurrentCamera then
+        track(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fit))
+    end
+
+    local logoId = loadAsset("exodus_logo.png", LOGO_CHUNKS)
+    local btnId = loadAsset("exodus_button.png", BUTTON_CHUNKS)
+    local vp0 = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+    local reopen = mk("ImageButton", {
+        Size = UDim2.fromOffset(56, 56), Position = UDim2.fromOffset(vp0.X / 2 - 28, vp0.Y - 84), BackgroundColor3 = Theme.bg,
+        Image = btnId or "", ScaleType = Enum.ScaleType.Fit, Visible = false, BorderSizePixel = 0, AutoButtonColor = false, ZIndex = 50,
+    }, gui)
+    mk("UIAspectRatioConstraint", { AspectRatio = 1 }, reopen)
+    round(reopen, 14)
+    outline(reopen, Theme.em, 2)
+    if not btnId then
+        local fl = txt(reopen, "E", 24, Theme.em, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+        fl.Size = UDim2.new(1, 0, 1, 0)
+    end
+    function UI.setVisible(v)
+        win.Visible = v
+        reopen.Visible = not v
+        if not v then UI.closeMenu() end
+    end
+    reopen.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            local startP = i.Position
+            local startPos = reopen.Position
+            local rd = { moved = false }
+            UI.reopenDown = rd
+            UI.drag = function(p)
+                local d = p - startP
+                if d.Magnitude > 6 then rd.moved = true end
+                if rd.moved then
+                    local cam = workspace.CurrentCamera
+                    local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
+                    local x = math.clamp(startPos.X.Offset + d.X, 0, vp.X - 56)
+                    local y = math.clamp(startPos.Y.Offset + d.Y, 0, vp.Y - 56)
+                    reopen.Position = UDim2.fromOffset(x, y)
+                end
+            end
+        end
+    end)
+
+    local top = mk("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = Theme.s1, BorderSizePixel = 0 }, win)
+    mk("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = Theme.ln, BorderSizePixel = 0 }, top)
+    local logo = mk("ImageLabel", {
+        Size = UDim2.fromOffset(28, 28), Position = UDim2.fromOffset(12, 6), BackgroundTransparency = 1, Image = logoId or "",
+        ScaleType = Enum.ScaleType.Fit, BorderSizePixel = 0, Visible = logoId ~= nil,
+    }, top)
+    local brandX = logoId and 46 or 16
+    local brand = txt(top, "EXODUS", 13, Theme.tx, Enum.Font.GothamBold)
+    brand.Position = UDim2.fromOffset(brandX, 0)
+    brand.Size = UDim2.fromOffset(70, 40)
+    local ver = mk("TextLabel", {
+        BackgroundColor3 = Theme.s1, Text = "v1", TextSize = 10, TextColor3 = Theme.mu, Font = Enum.Font.Code,
+        Position = UDim2.fromOffset(brandX + 68, 11), Size = UDim2.fromOffset(36, 18), BorderSizePixel = 0,
+    }, top)
+    round(ver, 9)
+    outline(ver, Theme.ln2)
+
+    local sbox = mk("Frame", {
+        Size = UDim2.fromOffset(300, 26), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+        BackgroundColor3 = Theme.s2, BorderSizePixel = 0,
+    }, top)
+    round(sbox, 8)
+    local sst = outline(sbox, Theme.ln)
+    local search = mk("TextBox", {
+        Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = "",
+        PlaceholderText = "Search settings...", PlaceholderColor3 = Theme.dm, TextColor3 = Theme.tx, TextSize = 12,
+        Font = Enum.Font.GothamMedium, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, BorderSizePixel = 0,
+    }, sbox)
+    search.Focused:Connect(function() sst.Color = Theme.em2 end)
+    search.FocusLost:Connect(function() sst.Color = Theme.ln end)
+    search:GetPropertyChangedSignal("Text"):Connect(function()
+        local q = search.Text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+        for _, r in ipairs(UI.rows) do
+            local hit = q == "" or r.key:find(q, 1, true) ~= nil
+            local tr = (q ~= "" and not hit) and 0.82 or 0
+            r.nameL.TextTransparency = tr
+            r.nameL.TextColor3 = (q ~= "" and hit) and Theme.em or Theme.tx
+            if r.descL then r.descL.TextTransparency = tr end
+            if r.valL then r.valL.TextTransparency = tr end
+        end
+    end)
+
+    local function winBtn(label, xoff, danger)
+        local b = mk("TextButton", {
+            Text = label, Size = UDim2.fromOffset(32, 26), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xoff, 0.5, 0),
+            BackgroundColor3 = danger and Theme.rd or Theme.s3, BackgroundTransparency = 1, TextColor3 = Theme.mu, TextSize = 14,
+            Font = Enum.Font.GothamBold, AutoButtonColor = false, BorderSizePixel = 0,
+        }, top)
+        round(b, 7)
+        b.MouseEnter:Connect(function()
+            b.BackgroundTransparency = 0
+            b.TextColor3 = Theme.white
+        end)
+        b.MouseLeave:Connect(function()
+            b.BackgroundTransparency = 1
+            b.TextColor3 = Theme.mu
+        end)
+        return b
+    end
+    local bMin = winBtn("-", -44, false)
+    local bClose = winBtn("x", -8, true)
+    bMin.MouseButton1Click:Connect(function() UI.setVisible(false) end)
+    bClose.MouseButton1Click:Connect(function() UI.setVisible(false) end)
+
+    top.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            local startP, startW = i.Position, win.Position
+            UI.drag = function(p)
+                local d = p - startP
+                win.Position = UDim2.new(startW.X.Scale, startW.X.Offset + d.X, startW.Y.Scale, startW.Y.Offset + d.Y)
+            end
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if UI.drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            UI.drag(i.Position)
+        end
+    end))
+    track(UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            UI.drag = nil
+            local rd = UI.reopenDown
+            if rd then
+                UI.reopenDown = nil
+                if not rd.moved then UI.setVisible(true) end
+            end
+        end
+    end))
+
+    local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -40), Position = UDim2.fromOffset(0, 40), BackgroundTransparency = 1, BorderSizePixel = 0 }, win)
+
+    local rail = mk("Frame", { Size = UDim2.new(0, 56, 1, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0, ClipsDescendants = true }, body)
+    UI.railScroll = mk("ScrollingFrame", {
+        Size = UDim2.new(1, -1, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2,
+        ScrollBarImageColor3 = Theme.ln2, CanvasSize = UDim2.new(0, 0, 0, 0), ScrollingDirection = Enum.ScrollingDirection.Y,
+        ElasticBehavior = Enum.ElasticBehavior.Never,
+    }, rail)
+    mk("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0), BackgroundColor3 = Theme.ln, BorderSizePixel = 0, ZIndex = 5 }, rail)
+    UI.ind = mk("Frame", { Size = UDim2.fromOffset(3, 40), Position = UDim2.fromOffset(0, 12), BackgroundColor3 = Theme.em, BorderSizePixel = 0 }, UI.railScroll)
+    round(UI.ind, 2)
+
+    local side = mk("Frame", { Size = UDim2.new(0, 160, 1, 0), Position = UDim2.fromOffset(56, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0 }, body)
+    mk("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0), BackgroundColor3 = Theme.ln, BorderSizePixel = 0 }, side)
+    local sh = txt(side, "EXODUS", 10, Theme.dm, Enum.Font.GothamBold)
+    sh.Position = UDim2.fromOffset(18, 18)
+    sh.Size = UDim2.new(1, -24, 0, 14)
+    UI.sideTitle = txt(side, "", 17, Theme.tx, Enum.Font.GothamBold)
+    UI.sideTitle.Position = UDim2.fromOffset(18, 36)
+    UI.sideTitle.Size = UDim2.new(1, -24, 0, 22)
+    UI.sideDesc = txt(side, "", 11, Theme.mu, Enum.Font.Gotham)
+    UI.sideDesc.Position = UDim2.fromOffset(18, 60)
+    UI.sideDesc.Size = UDim2.new(1, -28, 0, 30)
+    UI.sideDesc.TextWrapped = true
+    UI.sideDesc.TextYAlignment = Enum.TextYAlignment.Top
+    UI.sideList = mk("Frame", { Size = UDim2.new(1, -16, 1, -110), Position = UDim2.fromOffset(8, 100), BackgroundTransparency = 1, BorderSizePixel = 0 }, side)
+    mk("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, UI.sideList)
+
+    local ws = mk("Frame", { Size = UDim2.new(0, 464, 1, 0), Position = UDim2.fromOffset(216, 0), BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ClipsDescendants = true }, body)
+
+    local aside = mk("Frame", { Size = UDim2.new(0, 220, 1, 0), Position = UDim2.fromOffset(680, 0), BackgroundColor3 = Theme.s1, BorderSizePixel = 0 }, body)
+    mk("Frame", { Size = UDim2.new(0, 1, 1, 0), BackgroundColor3 = Theme.ln, BorderSizePixel = 0 }, aside)
+
+    local function jump(tab, card)
+        local page = tab.page
+        local y = (card.frame.AbsolutePosition.Y - page.AbsolutePosition.Y) / scale.Scale + page.CanvasPosition.Y - 8
+        page.CanvasPosition = Vector2.new(0, math.max(0, y))
+    end
+
+    function UI.showTab(id)
+        local tab = UI.tabs[id]
+        if not tab then return end
+        UI.closeMenu()
+        UI.current = id
+        for _, t in ipairs(UI.tabList) do
+            local on = (t == tab)
+            t.page.Visible = on
+            t.btn.TextColor3 = on and Theme.em or Theme.mu
+            t.btn.BackgroundTransparency = on and 0.88 or 1
+        end
+        tw(UI.ind, 0.35, { Position = UDim2.fromOffset(0, tab.y) })
+        local rs = UI.railScroll
+        local viewH = rs.AbsoluteSize.Y / scale.Scale
+        local topY = rs.CanvasPosition.Y
+        if tab.y < topY then
+            rs.CanvasPosition = Vector2.new(0, math.max(0, tab.y - 12))
+        elseif tab.y + 40 > topY + viewH then
+            rs.CanvasPosition = Vector2.new(0, math.max(0, tab.y + 52 - viewH))
+        end
+        UI.sideTitle.Text = tab.title
+        UI.sideDesc.Text = tab.desc
+        for _, c in ipairs(UI.sideList:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        for i, card in ipairs(tab.cards) do
+            local b = mk("TextButton", {
+                Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = Theme.s2, BackgroundTransparency = 1, Text = "",
+                AutoButtonColor = false, LayoutOrder = i, BorderSizePixel = 0,
+            }, UI.sideList)
+            round(b, 8)
+            local dot = mk("Frame", { Size = UDim2.fromOffset(5, 5), Position = UDim2.new(0, 10, 0.5, -2), BackgroundColor3 = Theme.dm, BorderSizePixel = 0 }, b)
+            round(dot, 3)
+            local l = txt(b, card.title, 12, Theme.mu, Enum.Font.GothamMedium)
+            l.Position = UDim2.fromOffset(26, 0)
+            l.Size = UDim2.new(1, -30, 1, 0)
+            b.MouseEnter:Connect(function()
+                b.BackgroundTransparency = 0
+                l.TextColor3 = Theme.tx
+            end)
+            b.MouseLeave:Connect(function()
+                b.BackgroundTransparency = 1
+                l.TextColor3 = Theme.mu
+            end)
+            b.MouseButton1Click:Connect(function()
+                dot.BackgroundColor3 = Theme.em
+                jump(tab, card)
+            end)
+        end
+        tab.page.CanvasPosition = Vector2.new(0, 0)
+    end
+
+    function UI.addTab(id, label, title, desc)
+        local idx = #UI.tabList + 1
+        local y = 12 + (idx - 1) * 46
+        local btn = mk("TextButton", {
+            Text = label, Size = UDim2.fromOffset(44, 40), Position = UDim2.fromOffset(6, y), BackgroundColor3 = Theme.em,
+            BackgroundTransparency = 1, TextColor3 = Theme.mu, TextSize = 11, Font = Enum.Font.GothamBold, AutoButtonColor = false,
+            BorderSizePixel = 0,
+        }, UI.railScroll)
+        round(btn, 10)
+        UI.railScroll.CanvasSize = UDim2.new(0, 0, 0, 12 + idx * 46 + 12)
+        local page = mk("ScrollingFrame", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+            ScrollBarImageColor3 = Theme.ln2, CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            ScrollingDirection = Enum.ScrollingDirection.Y, Visible = false,
+        }, ws)
+        mk("UIListLayout", { Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder }, page)
+        pad(page, 18, 18, 16, 24)
+        local head = mk("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, LayoutOrder = 0, BorderSizePixel = 0 }, page)
+        local h1 = txt(head, title, 22, Theme.tx, Enum.Font.GothamBold)
+        h1.Size = UDim2.new(1, 0, 0, 28)
+        local h2 = txt(head, desc, 11.5, Theme.mu, Enum.Font.Gotham)
+        h2.Position = UDim2.fromOffset(0, 28)
+        h2.Size = UDim2.new(1, 0, 0, 16)
+        local tab = setmetatable({ id = id, title = title, desc = desc, page = page, cards = {}, btn = btn, y = y }, Tab)
+        UI.tabs[id] = tab
+        UI.tabList[idx] = tab
+        btn.MouseEnter:Connect(function()
+            if UI.current ~= id then btn.BackgroundTransparency = 0.94 end
+        end)
+        btn.MouseLeave:Connect(function()
+            if UI.current ~= id then btn.BackgroundTransparency = 1 end
+        end)
+        btn.MouseButton1Click:Connect(function() UI.showTab(id) end)
+        return tab
+    end
+
+    local function panel(title, y, h)
+        local p = mk("Frame", { Size = UDim2.new(1, -28, 0, h), Position = UDim2.fromOffset(14, y), BackgroundColor3 = Theme.s2, BorderSizePixel = 0 }, aside)
+        round(p, 8)
+        outline(p, Theme.ln)
+        local t = txt(p, title, 12, Theme.tx, Enum.Font.GothamBold)
+        t.Position = UDim2.fromOffset(14, 0)
+        t.Size = UDim2.new(1, -28, 0, 34)
+        mk("Frame", { Size = UDim2.new(1, -28, 0, 1), Position = UDim2.fromOffset(14, 34), BackgroundColor3 = Theme.ln, BorderSizePixel = 0 }, p)
+        return p
+    end
+    local pStatus = panel("STATUS", 16, 232)
+    local function statusRow(i, label, get)
+        local l = txt(pStatus, label, 11.5, Theme.tx, Enum.Font.GothamMedium)
+        l.Position = UDim2.fromOffset(14, 38 + (i - 1) * 24)
+        l.Size = UDim2.new(0.5, 0, 0, 24)
+        local v = txt(pStatus, "", 11.5, Theme.mu, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+        v.Position = UDim2.new(0.4, 0, 0, 38 + (i - 1) * 24)
+        v.Size = UDim2.new(0.6, -14, 0, 24)
+        UI.updaters[#UI.updaters + 1] = function() v.Text = tostring(get()) end
+    end
+    statusRow(1, "Interface", function() return "Online" end)
+    statusRow(2, "State", function() return S.state end)
+    statusRow(3, "Place", function() return (game.PlaceId == CFG.DungeonPlace) and "Dungeon" or ((game.PlaceId == CFG.LobbyPlace) and "Lobby" or "Other") end)
+    statusRow(4, "Room", function() return tostring(S.room or "-") end)
+    statusRow(5, "Runs", function() return S.runs end)
+    statusRow(6, "Deaths", function() return S.deaths end)
+    statusRow(7, "Last clear", function() return string.format("%.0fs", S.lastClear) end)
+    local pLog = panel("CHANGELOG", 262, 230)
+    local clRaw = readFile("DQR_changelog.txt")
+    if not clRaw then
+        clRaw = "# EXODUS changelog. One entry per line, format  version: text\n# Lines starting with # are ignored. Remove the # to show an entry.\nv1: The release\n# v2: haha\n"
+        writeFile("DQR_changelog.txt", clRaw)
+    end
+    local entries = {}
+    for line in clRaw:gmatch("[^\r\n]+") do
+        if not line:match("^%s*#") then
+            local v, t = line:match("^%s*(.-)%s*:%s*(.+)$")
+            if v and t and #entries < 4 then entries[#entries + 1] = { v, t } end
+        end
+    end
+    for i, e in ipairs(entries) do
+        local a = txt(pLog, e[1], 11, Theme.em, Enum.Font.Code)
+        a.Position = UDim2.fromOffset(14, 40 + (i - 1) * 46)
+        a.Size = UDim2.new(1, -28, 0, 14)
+        local b = txt(pLog, e[2], 11, Theme.mu, Enum.Font.Gotham)
+        b.Position = UDim2.fromOffset(14, 54 + (i - 1) * 46)
+        b.Size = UDim2.new(1, -28, 0, 28)
+        b.TextWrapped = true
+        b.TextYAlignment = Enum.TextYAlignment.Top
+    end
+
+    local tHome = UI.addTab("home", "Home", "Home", "Overview of your session")
+    local tFarm = UI.addTab("farm", "Farm", "Autofarm", "Dungeon and combat behaviour")
+    local tDodge = UI.addTab("dodge", "Dodge", "Dodge", "Telegraphs, bosses and Look Away")
+    local tAuto = UI.addTab("auto", "Auto", "Automation", "Hands-free run management")
+    local tPerf = UI.addTab("perf", "Perf", "Performance", "Lower load for long sessions")
+    local tMenu = UI.addTab("menu", "Menu", "Menu", "Interface behaviour and shutdown")
+    local tCfg = UI.addTab("cfg", "Cfg", "Config", "Save and restore setups")
+
+    local stats = mk("Frame", { Size = UDim2.new(1, 0, 0, 70), BackgroundTransparency = 1, LayoutOrder = 1, BorderSizePixel = 0 }, tHome.page)
+    mk("UIGridLayout", { CellSize = UDim2.new(0.25, -8, 1, 0), CellPadding = UDim2.fromOffset(10, 0), SortOrder = Enum.SortOrder.LayoutOrder }, stats)
+    local function stat(i, label, get)
+        local f = mk("Frame", { BackgroundColor3 = Theme.s1, BorderSizePixel = 0, LayoutOrder = i }, stats)
+        round(f, 8)
+        outline(f, Theme.ln)
+        local a = txt(f, label, 11, Theme.mu, Enum.Font.Gotham)
+        a.Position = UDim2.fromOffset(12, 10)
+        a.Size = UDim2.new(1, -16, 0, 14)
+        local b = txt(f, "", 18, Theme.tx, Enum.Font.GothamBold)
+        b.Position = UDim2.fromOffset(12, 30)
+        b.Size = UDim2.new(1, -16, 0, 26)
+        UI.updaters[#UI.updaters + 1] = function() b.Text = tostring(get()) end
+    end
+    stat(1, "Session", function() return fmtTime(os.clock() - S.startT) end)
+    stat(2, "Runs", function() return S.runs end)
+    stat(3, "Deaths", function() return S.deaths end)
+    stat(4, "Last clear", function() return string.format("%.0fs", S.lastClear) end)
+
+    local cAct = tHome:Card("Activity")
+    for i = 1, 6 do
+        local row, nameL = newRow(cAct, { name = "" }, 24)
+        UI.rows[#UI.rows] = nil
+        nameL.Size = UDim2.new(1, 0, 1, 0)
+        nameL.TextColor3 = Theme.mu
+        nameL.TextSize = 11
+        UI.updaters[#UI.updaters + 1] = function()
+            local line = logbuf[#logbuf - (i - 1)]
+            nameL.Text = line and line:gsub("^%[[%d%.]+%]%s*", "") or ""
+        end
+    end
+    local cShort = tHome:Card("Shortcuts")
+    cShort:Button({ name = "Start session", desc = "Same as the master switch", text = "Start", style = "primary", cb = function()
+        farmSet(true)
+        if UI.farmW then UI.farmW.Set(true, true) end
+    end })
+    cShort:Button({ name = "Stop session", text = "Stop", cb = function()
+        farmSet(false)
+        if UI.farmW then UI.farmW.Set(false, true) end
+    end })
+    cShort:Button({ name = "Open configs", text = "Open", cb = function() UI.showTab("cfg") end })
+
+    local cCore = tFarm:Card("Core")
+    UI.farmW = cCore:Toggle({ name = "Enable Autofarm", desc = "Master switch for the whole bot", get = function() return S.running end, set = farmSet })
+    cCore:Toggle({ name = "Orbit around mobs", desc = "Circle targets instead of standing still", flag = "Orbit", get = function() return CFG.Orbit end, set = function(v) CFG.Orbit = v end })
+    local cDun = tFarm:Card("Dungeon")
+    cDun:Info({ name = "Dungeon", get = function() return "Gilded Skies" end })
+    cDun:Dropdown({ name = "Difficulty", options = { "Insane", "Nightmare" }, flag = "Difficulty", get = function() return CFG.Difficulty end, set = function(v) CFG.Difficulty = v end })
+    local cAb = tFarm:Card("Abilities")
+    cAb:Toggle({ name = "Use first ability", desc = "Aimed cast when a target is near", flag = "UseFirst", get = function() return CFG.UseFirst end, set = function(v) CFG.UseFirst = v end })
+    cAb:Dropdown({ name = "First ability key", options = KEYS, flag = "FirstKey", get = function() return CFG.FirstKey.Name end, set = function(v) if Enum.KeyCode[v] then CFG.FirstKey = Enum.KeyCode[v] end end })
+    cAb:Toggle({ name = "Use second ability", desc = "Aimed cast when a target is near", flag = "UseSecond", get = function() return CFG.UseSecond end, set = function(v) CFG.UseSecond = v end })
+    cAb:Dropdown({ name = "Second ability key", options = KEYS, flag = "SecondKey", get = function() return CFG.SecondKey.Name end, set = function(v) if Enum.KeyCode[v] then CFG.SecondKey = Enum.KeyCode[v] end end })
+    cAb:Toggle({ name = "Always use speed ability", desc = "Inner Focus / Inner Rage on cooldown, anywhere", flag = "AlwaysSpeed", get = function() return CFG.AlwaysSpeed end, set = function(v) CFG.AlwaysSpeed = v end })
+    cAb:Dropdown({ name = "Speed ability slot", desc = "Auto detects it by icon or by speed gain", options = { "Auto", "First", "Second", "Both", "None" }, flag = "SpeedSlot", get = function() return CFG.SpeedSlot end, set = function(v) CFG.SpeedSlot = v end })
+    cAb:Dropdown({ name = "Ability press mode", options = { "Both", "Key", "Button" }, flag = "PressMode", get = function() return CFG.PressMode end, set = function(v) CFG.PressMode = v end })
+    local cDist = tFarm:Card("Distances")
+    cDist:Slider({ name = "Orbit distance", min = 15, max = 80, step = 1, suffix = " st", flag = "OrbitRadius", get = function() return CFG.OrbitRadius end, set = function(v) CFG.OrbitRadius = v end })
+    cDist:Slider({ name = "Boss distance", min = 10, max = 80, step = 1, suffix = " st", flag = "BossOrbit", get = function() return CFG.BossOrbit end, set = function(v) CFG.BossOrbit = v end })
+    cDist:Slider({ name = "Cast gap", min = 0.15, max = 2, step = 0.05, suffix = " s", flag = "CastGap", get = function() return CFG.CastGap end, set = function(v) CFG.CastGap = v end })
+    local cAim = tFarm:Card("Aim")
+    cAim:Toggle({ name = "Aim camera at target on cast", flag = "CamAim", get = function() return CFG.CamAim end, set = function(v) CFG.CamAim = v end })
+    cAim:Dropdown({ name = "Face target method", options = { "Constraint", "CFrame", "Off" }, flag = "FaceMode", get = function() return CFG.FaceMode end, set = function(v) CFG.FaceMode = v end })
+    cAim:Toggle({ name = "Continuous aim", desc = "Shiftlock style, may feel heavy", flag = "ContAim", get = function() return CFG.ContAim end, set = function(v) CFG.ContAim = v end })
+
+    local cDc = tDodge:Card("Core")
+    cDc:Toggle({ name = "Dodge telegraphs", desc = "Master switch for all dodging", flag = "DodgeZones", get = function() return CFG.DodgeZones end, set = function(v) CFG.DodgeZones = v end })
+    cDc:Toggle({ name = "Show detected zones", desc = "Green warning, yellow soon, red lethal", flag = "Debug", get = function() return CFG.Debug end, set = function(v) CFG.Debug = v end })
+    local cTime = tDodge:Card("Timing")
+    cTime:Slider({ name = "Reaction delay", min = 0, max = 400, step = 10, suffix = " ms", flag = "ReactionMs", get = function() return CFG.ReactionMs end, set = function(v) CFG.ReactionMs = v end })
+    cTime:Slider({ name = "Mob hitbox linger", min = 0, max = 3, step = 0.1, suffix = " s", flag = "Linger", get = function() return CFG.Linger end, set = function(v) CFG.Linger = v end })
+    local cPadding = tDodge:Card("Padding")
+    cPadding:Slider({ name = "Mob zone padding", min = 1, max = 10, step = 0.5, suffix = " st", flag = "ZonePad", get = function() return CFG.ZonePad end, set = function(v) CFG.ZonePad = v end })
+    cPadding:Slider({ name = "Boss zone padding", min = 0.5, max = 6, step = 0.1, suffix = " st", flag = "BossPad", get = function() return CFG.BossPad end, set = function(v) CFG.BossPad = v end })
+    local cBoss = tDodge:Card("Boss")
+    cBoss:Slider({ name = "Boss hit window", min = 0.1, max = 1.5, step = 0.05, suffix = " s", flag = "Hit", get = function() return CFG.Hit end, set = function(v) CFG.Hit = v end })
+    cBoss:Slider({ name = "Boss warning lead", desc = "High = lethal from spawn", min = 0, max = 4, step = 0.1, suffix = " s", flag = "Lead", get = function() return CFG.Lead end, set = function(v) CFG.Lead = v end })
+    cBoss:Slider({ name = "Boss telegraph fallback", min = 0.5, max = 3, step = 0.1, suffix = " s", flag = "BossTele", get = function() return CFG.BossTele end, set = function(v) CFG.BossTele = v end })
+    cBoss:Slider({ name = "Safe circle margin", min = 2, max = 12, step = 0.5, suffix = " st", flag = "SafePref", get = function() return CFG.SafePref end, set = function(v) CFG.SafePref = v end })
+    local cLook = tDodge:Card("Look Away")
+    cLook:Toggle({ name = "Face away on Look Away", flag = "FaceAway", get = function() return CFG.FaceAway end, set = function(v) CFG.FaceAway = v end })
+    cLook:Toggle({ name = "Turn camera away too", flag = "LookCam", get = function() return CFG.LookCam end, set = function(v) CFG.LookCam = v end })
+    cLook:Slider({ name = "Hold after text ends", min = 0.5, max = 8, step = 0.1, suffix = " s", flag = "LookHold", get = function() return CFG.LookHold end, set = function(v) CFG.LookHold = v end })
+
+    local cFlow = tAuto:Card("Flow")
+    cFlow:Toggle({ name = "Auto enter dungeon", desc = "Plays through the lobby menus", flag = "AutoEnter", get = function() return CFG.AutoEnter end, set = function(v) CFG.AutoEnter = v end })
+    cFlow:Toggle({ name = "Auto navigate rooms", desc = "Walks room to room by itself", flag = "AutoNav", get = function() return CFG.AutoNav end, set = function(v) CFG.AutoNav = v end })
+    local cRuns = tAuto:Card("Runs")
+    cRuns:Slider({ name = "Max runs (0 = unlimited)", min = 0, max = 200, step = 1, flag = "MaxRuns", get = function() return CFG.MaxRuns end, set = function(v) CFG.MaxRuns = v end })
+    cRuns:Slider({ name = "Break between runs, min", min = 5, max = 120, step = 5, suffix = " s", flag = "BreakMin", get = function() return CFG.BreakMin end, set = function(v) CFG.BreakMin = v if CFG.BreakMax < v then CFG.BreakMax = v end end })
+    cRuns:Slider({ name = "Break between runs, max", min = 10, max = 180, step = 5, suffix = " s", flag = "BreakMax", get = function() return CFG.BreakMax end, set = function(v) CFG.BreakMax = math.max(v, CFG.BreakMin) end })
+    cRuns:Slider({ name = "Stop after deaths in one run", min = 1, max = 10, step = 1, flag = "MaxDeaths", get = function() return CFG.MaxDeathsPerRun end, set = function(v) CFG.MaxDeathsPerRun = v end })
+    cRuns:Slider({ name = "Humanize timing", min = 0.6, max = 2, step = 0.1, suffix = "x", flag = "Humanize", get = function() return CFG.Humanize end, set = function(v) CFG.Humanize = v end })
+    local cVis = tPerf:Card("Visuals")
+    cVis:Toggle({ name = "Lowest quality", desc = "Force minimum render quality", flag = "LowQuality", get = function() return CFG.LowQuality end, set = function(v) CFG.LowQuality = v applyPerf() end })
+    cVis:Toggle({ name = "Hide other players", desc = "Makes every other player invisible to you", flag = "HidePlayers", get = function() return CFG.HidePlayers end, set = function(v) CFG.HidePlayers = v Hide.set(v) end })
+    cVis:Toggle({ name = "No shadows", flag = "NoShadows", get = function() return CFG.NoShadows end, set = function(v) CFG.NoShadows = v applyPerf() end })
+    cVis:Toggle({ name = "Disable 3D rendering", desc = "Big AFK saver, screen goes black", flag = "No3D", get = function() return CFG.No3D end, set = function(v) CFG.No3D = v applyPerf() end })
+    local cFps = tPerf:Card("Frame cap")
+    cFps:Toggle({ name = "Limit FPS", flag = "FpsCapOn", get = function() return CFG.FpsCapOn end, set = function(v) CFG.FpsCapOn = v applyPerf() end })
+    cFps:Slider({ name = "Frame cap", min = 15, max = 240, step = 5, suffix = " fps", flag = "FpsCap", get = function() return CFG.FpsCap end, set = function(v) CFG.FpsCap = v applyPerf() end })
+
+    local cKeys = tMenu:Card("Keybinds")
+    cKeys:Keybind({ name = "Toggle menu", flag = "kMenu", get = function() return UI.keys.menu.Name end, set = function(v) if Enum.KeyCode[v] then UI.keys.menu = Enum.KeyCode[v] end end })
+    cKeys:Keybind({ name = "Quick toggle farm", flag = "kFarm", get = function() return UI.keys.farm.Name end, set = function(v) if Enum.KeyCode[v] then UI.keys.farm = Enum.KeyCode[v] end end })
+    cKeys:Keybind({ name = "Panic stop", desc = "Stops the farm immediately", flag = "kPanic", get = function() return UI.keys.panic.Name end, set = function(v) if Enum.KeyCode[v] then UI.keys.panic = Enum.KeyCode[v] end end })
+    local cApp = tMenu:Card("Appearance")
+    cApp:Toggle({ name = "Animations", desc = "Interface motion", flag = "Anim", get = function() return UI.anim end, set = function(v) UI.anim = v end })
+    cApp:Toggle({ name = "Notifications", desc = "Show toast messages", flag = "Notif", get = function() return UI.notif end, set = function(v) UI.notif = v end })
+    local cUn = tMenu:Card("Danger zone")
+    cUn:Button({ name = "Unload interface", desc = "Stops the farm and closes EXODUS", text = "Unload", style = "danger", cb = function(btn)
+        if UI.armed then
+            Destroy()
+        else
+            UI.armed = true
+            btn.Text = "Click to confirm"
+            task.delay(2.5, function()
+                UI.armed = false
+                if btn.Parent then btn.Text = "Unload" end
+            end)
+        end
+    end })
+
+    local cMan = tCfg:Card("Manage")
+    UI.cfgBox = cMan:Input({ name = "Config name", placeholder = "Config name" })
+    cMan:Button({ name = "Create", desc = "Saves the current settings under that name", text = "Create", style = "primary", cb = function()
+        if not hasFS then
+            notify("Config", "This executor has no file access")
+            return
+        end
+        local name = UI.cfgBox.Text:gsub("[^%w_%-]", "")
+        if name == "" then name = "default" end
+        writeFile(cfgFile(name), HttpService:JSONEncode(snapshotSettings()))
+        local idx = loadIndex()
+        local found = false
+        for _, n in ipairs(idx) do
+            if n == name then found = true end
+        end
+        if not found then
+            idx[#idx + 1] = name
+            saveIndex(idx)
+        end
+        UI.cfgBox.Text = ""
+        UI.refreshCfg()
+        notify("Config", "Saved " .. name)
+    end })
+    cMan:Button({ name = "Delete", desc = "Removes the config typed above", text = "Delete", style = "danger", cb = function()
+        local name = UI.cfgBox.Text:gsub("[^%w_%-]", "")
+        local idx = loadIndex()
+        for i, n in ipairs(idx) do
+            if n == name then
+                table.remove(idx, i)
+                break
+            end
+        end
+        saveIndex(idx)
+        if delfile then pcall(delfile, CFG.Folder .. "/" .. cfgFile(name)) end
+        local auto = readFile("DQR_autoload.txt")
+        if auto and auto:gsub("%s+", "") == name then writeFile("DQR_autoload.txt", "") end
+        UI.refreshCfg()
+        notify("Config", "Deleted " .. name)
+    end })
+    cMan:Button({ name = "Restore defaults", desc = "Every setting back to its default", text = "Restore", style = "danger", cb = function()
+        applySettings(UI.defaults)
+        notify("Config", "Defaults restored")
+    end })
+    local cSaved = tCfg:Card("Saved configs")
+    cSaved.n = cSaved.n + 1
+    UI.cfgHolder = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = cSaved.n, BorderSizePixel = 0 }, cSaved.frame)
+    mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, UI.cfgHolder)
+    pad(UI.cfgHolder, 0, 0, 8, 8)
+    local function smallBtn(parent, label, xoff, w, bg, fg, strokeCol)
+        local b = mk("TextButton", {
+            Text = label, Size = UDim2.fromOffset(w, 24), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xoff, 0.5, 0),
+            BackgroundColor3 = bg, TextColor3 = fg, TextSize = 11, Font = Enum.Font.GothamBold, AutoButtonColor = false, BorderSizePixel = 0,
+        }, parent)
+        round(b, 6)
+        outline(b, strokeCol)
+        return b
+    end
+    function UI.refreshCfg()
+        for _, c in ipairs(UI.cfgHolder:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        local auto = readFile("DQR_autoload.txt")
+        if auto then auto = auto:gsub("%s+", "") end
+        for i, name in ipairs(loadIndex()) do
+            local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = Theme.s2, BorderSizePixel = 0, LayoutOrder = i }, UI.cfgHolder)
+            round(row, 7)
+            outline(row, Theme.ln)
+            local pick = mk("TextButton", {
+                Text = name, TextXAlignment = Enum.TextXAlignment.Left, TextSize = 12, Font = Enum.Font.GothamMedium, TextColor3 = Theme.tx,
+                BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -130, 1, 0), AutoButtonColor = false, BorderSizePixel = 0,
+            }, row)
+            pick.MouseButton1Click:Connect(function() UI.cfgBox.Text = name end)
+            local isAuto = auto == name
+            local ab = smallBtn(row, "Auto", -8, 50,
+                isAuto and Color3.fromRGB(24, 74, 44) or Color3.fromRGB(74, 24, 31),
+                isAuto and Color3.fromRGB(88, 230, 140) or Theme.rd,
+                isAuto and Color3.fromRGB(46, 160, 90) or Color3.fromRGB(150, 58, 68))
+            local lb = smallBtn(row, "Load", -66, 50, Theme.s3, Theme.white, Theme.ln2)
+            lb.MouseButton1Click:Connect(function()
+                local raw = readFile(cfgFile(name))
+                if not raw then
+                    notify("Config", "File missing for " .. name)
+                    return
+                end
+                local ok, t = pcall(function() return HttpService:JSONDecode(raw) end)
+                if ok and type(t) == "table" then
+                    applySettings(t)
+                    notify("Config", "Loaded " .. name)
+                else
+                    notify("Config", "Config file is damaged")
+                end
+            end)
+            ab.MouseButton1Click:Connect(function()
+                if isAuto then
+                    writeFile("DQR_autoload.txt", "")
+                    notify("Config", "Autoload cleared")
+                else
+                    writeFile("DQR_autoload.txt", name)
+                    notify("Config", name .. " loads when the script runs")
+                end
+                UI.refreshCfg()
+            end)
+        end
+    end
+    UI.refreshCfg()
+
+    local toast = mk("Frame", {
+        Size = UDim2.fromOffset(300, 34), AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, 50),
+        BackgroundColor3 = Theme.s3, BorderSizePixel = 0, ZIndex = 100, Visible = false,
+    }, gui)
+    round(toast, 17)
+    outline(toast, Theme.em2)
+    local toastL = txt(toast, "", 12, Theme.tx, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    toastL.Size = UDim2.new(1, -20, 1, 0)
+    toastL.Position = UDim2.fromOffset(10, 0)
+    toastL.ZIndex = 101
+    toastFn = function(title, content, dur)
+        if not UI.notif then return end
+        local msg = tostring(title) .. ": " .. tostring(content)
+        toastL.Text = msg
+        toast.Size = UDim2.fromOffset(math.clamp(#msg * 6.6 + 40, 180, 700), 34)
+        toast.Visible = true
+        toast.Position = UDim2.new(0.5, 0, 1, 50)
+        tw(toast, 0.4, { Position = UDim2.new(0.5, 0, 1, -22) })
+        UI.toastId = (UI.toastId or 0) + 1
+        local id = UI.toastId
+        task.delay(dur or 4, function()
+            if UI.toastId == id and toast.Parent then
+                tw(toast, 0.4, { Position = UDim2.new(0.5, 0, 1, 50) })
+                task.delay(0.5, function()
+                    if UI.toastId == id and toast.Parent then toast.Visible = false end
+                end)
+            end
+        end)
+    end
+
+    track(UIS.InputBegan:Connect(function(i, gp)
+        if UI.menu and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            local p = UIS:GetMouseLocation()
+            local function inside(o)
+                if not o or not o.Parent then return false end
+                local a, s = o.AbsolutePosition, o.AbsoluteSize
+                return p.X >= a.X and p.X <= a.X + s.X and p.Y >= a.Y and p.Y <= a.Y + s.Y
+            end
+            if not inside(UI.menu) and not inside(UI.menuAnchor) then UI.closeMenu() end
+        end
+        if gp or UI.capturing or i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        if i.KeyCode == UI.keys.menu then
+            UI.setVisible(not win.Visible)
+        elseif i.KeyCode == UI.keys.farm then
+            local on = not S.running
+            farmSet(on)
+            if UI.farmW then UI.farmW.Set(on, true) end
+        elseif i.KeyCode == UI.keys.panic then
+            if S.running then
+                Stop("panic key")
+                if UI.farmW then UI.farmW.Set(false, true) end
+            end
+        end
+    end))
+
+    task.spawn(function()
+        while alive do
+            for _, u in ipairs(UI.updaters) do pcall(u) end
+            if UI.farmW and UI.farmW.value ~= S.running then UI.farmW.Set(S.running, true) end
+            task.wait(1)
+        end
+    end)
+
+    uiDestroy = function()
+        pcall(function() gui:Destroy() end)
+    end
+
+    UI.showTab("home")
+
+    local raw = readFile("DQR_settings.json")
+    if raw then
+        local ok, t = pcall(function() return HttpService:JSONDecode(raw) end)
+        if ok and type(t) == "table" then applySettings(t) end
+    end
+    local auto = readFile("DQR_autoload.txt")
+    if auto and auto ~= "" then
+        local craw = readFile(cfgFile(auto))
+        if craw then
+            local ok, t = pcall(function() return HttpService:JSONDecode(craw) end)
+            if ok and type(t) == "table" then applySettings(t) end
+        end
+    end
+    applyPerf()
+    UI.ready = true
+    return true
+end
+
+loadSpeed()
+local uiOk, uiErr = pcall(buildUI)
+if not uiOk then
+    warn("[Exodus] UI failed: " .. tostring(uiErr))
+    log("UI failed: " .. tostring(uiErr))
+end
+if RESUME then resumeFarm(UI.farmW) end
+
+notify("Exodus", "Loaded v1. Right Shift hides the menu.", 5)
