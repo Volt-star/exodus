@@ -20,7 +20,7 @@ pcall(function() VIM = game:GetService("VirtualInputManager") end)
 local LP = Players.LocalPlayer
 
 local CFG = {
-    ScriptURL = "https://pastebin.com/raw/L6FEdV6Y",
+    ScriptURL = "https://raw.githubusercontent.com/Volt-star/exodus/refs/heads/main/exodus.txt",
     Folder = "Exodus",
     LobbyPlace = 77649408247578,
     DungeonPlace = 85776757589518,
